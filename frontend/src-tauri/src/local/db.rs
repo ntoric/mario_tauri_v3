@@ -13,11 +13,16 @@ pub fn now_ts() -> String {
 
 pub fn init_db(path: &Path) -> Result<Connection, rusqlite::Error> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("[db] failed to create directory {}: {e}", parent.display());
+        }
     }
     let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    if let Err(e) = conn.pragma_update(None, "journal_mode", "WAL") {
+        eprintln!("[db] WAL unavailable, using default journal: {e}");
+    }
     run_migrations(&conn)?;
     run_seeds(&conn)?;
     Ok(conn)
@@ -288,7 +293,6 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
     updated_at TEXT DEFAULT {ts},
     modified_by TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(pushed, id);
 
 -- Last-write-wins ordering: per-entity timestamp of the most recent
 -- mutation's ORIGIN time. Written on local mutations (enqueue) and on
@@ -326,10 +330,17 @@ CREATE TABLE IF NOT EXISTS sync_entity_ts (
         "ALTER TABLE items ADD COLUMN enabled INTEGER DEFAULT 1",
         "ALTER TABLE categories ADD COLUMN is_favourite INTEGER DEFAULT 0",
         "ALTER TABLE items ADD COLUMN is_favourite INTEGER DEFAULT 0",
+        "ALTER TABLE sync_outbox ADD COLUMN store_id TEXT",
+        "ALTER TABLE sync_outbox ADD COLUMN attempts INTEGER DEFAULT 0",
+        "ALTER TABLE sync_outbox ADD COLUMN pushed INTEGER DEFAULT 0",
     ];
     for q in alters {
         let _ = conn.execute(q, []);
     }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(pushed, id);",
+    )?;
 
     // Audit columns on every table. SQLite rejects non-constant defaults in
     // ADD COLUMN, so migrated DBs get NULLABLE columns and the audit triggers

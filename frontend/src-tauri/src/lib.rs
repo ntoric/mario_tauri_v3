@@ -204,8 +204,63 @@ async fn api_request(
     Ok(api::dispatch(&**state, &app, req).await)
 }
 
+/// Last-resort fatal error reporting for startup failures. With
+/// `windows_subsystem = "windows"` there is no console, so we append to a
+/// log file in the temp dir and show a MessageBox on Windows.
+fn report_fatal_startup_error(msg: &str) {
+    report_error(msg, true);
+}
+
+fn report_error(msg: &str, show_dialog: bool) {
+    let log_path = std::env::temp_dir().join("mario_juicy_startup.log");
+    let line = format!(
+        "[{}] {msg}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+    eprintln!("{line}");
+    let _ = show_dialog;
+
+    #[cfg(target_os = "windows")]
+    if show_dialog {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_ICONERROR, MB_OK,
+        };
+        let text = format!("{msg}\n\nLog: {}", log_path.display());
+        let to_wide = |s: &str| -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        };
+        let text_w = to_wide(&text);
+        let caption_w = to_wide("Mario Juicy failed to start");
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text_w.as_ptr(),
+                caption_w.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Surface panics that happen before/without a window — otherwise the
+    // process exits silently (no console on Windows GUI apps).
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let main = std::thread::current().name() == Some("main");
+        report_error(&format!("Fatal error: {info}"), main);
+        default_hook(info);
+    }));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -213,12 +268,35 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             use tauri::Manager;
-            let db_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
-            let db_path = db_dir.join("mario_local.db");
-            let backend = Arc::new(LocalBackend::new(&db_path)?);
+            // Candidate directories for the local DB, in priority order.
+            // Local data first so fresh installs avoid roaming/redirected
+            // profile folders; existing DBs elsewhere are still found.
+            let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+            let mut push_unique = |d: std::path::PathBuf| {
+                if !dirs.contains(&d) {
+                    dirs.push(d);
+                }
+            };
+            if let Ok(d) = app.path().app_local_data_dir() {
+                push_unique(d);
+            }
+            if let Ok(d) = app.path().app_data_dir() {
+                push_unique(d);
+            }
+            if let Some(d) = dirs::data_local_dir().map(|d| d.join("com.mario.juicy")) {
+                push_unique(d);
+            }
+            if let Some(d) = dirs::home_dir().map(|d| d.join(".mario_juicy")) {
+                push_unique(d);
+            }
+
+            let backend = match LocalBackend::open_resilient(&dirs) {
+                Ok(b) => Arc::new(b),
+                Err(e) => {
+                    report_fatal_startup_error(&e);
+                    return Err(e.into());
+                }
+            };
             local::cleanup::start_cleanup_worker(backend.clone());
             local::cleanup::start_bill_queue_worker(backend.clone());
             local::sync::start(backend.clone(), app.handle().clone());

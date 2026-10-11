@@ -8,6 +8,9 @@ pub mod sync;
 use rusqlite::Connection;
 use std::sync::Mutex;
 
+/// File name of the embedded SQLite database inside a candidate directory.
+pub const DB_FILE_NAME: &str = "mario_local.db";
+
 /// Shared state for the embedded local backend.
 /// Holds the SQLite connection and the JWT signing secret.
 pub struct LocalBackend {
@@ -120,6 +123,124 @@ impl LocalBackend {
                 *cur = file_identity(&self.db_path);
             }
             Err(e) => eprintln!("[local] failed to reopen database file: {e}"),
+        }
+    }
+
+    /// Opens the local DB from the first usable candidate directory.
+    ///
+    /// Pass 1 prefers directories that already contain a database (preserves
+    /// existing data, e.g. an older install that stored it in the roaming
+    /// profile). Pass 2 falls back to creating a fresh DB in the first
+    /// writable directory. Returns every per-path error joined together when
+    /// no location works.
+    pub fn open_resilient(candidate_dirs: &[std::path::PathBuf]) -> Result<Self, String> {
+        let mut errors: Vec<String> = Vec::new();
+        let mut tried = vec![false; candidate_dirs.len()];
+
+        // Pass 1: existing databases first.
+        for (i, dir) in candidate_dirs.iter().enumerate() {
+            let path = dir.join(DB_FILE_NAME);
+            if !path.exists() {
+                continue;
+            }
+            tried[i] = true;
+            match Self::open_or_recover(&path) {
+                Ok(be) => {
+                    if i > 0 {
+                        eprintln!("[db] using database at {}", path.display());
+                    }
+                    return Ok(be);
+                }
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
+            }
+        }
+
+        // Pass 2: create or open fresh in the remaining candidates.
+        for (i, dir) in candidate_dirs.iter().enumerate() {
+            if tried[i] {
+                continue;
+            }
+            let path = dir.join(DB_FILE_NAME);
+            match Self::open_or_recover(&path) {
+                Ok(be) => {
+                    if i > 0 {
+                        eprintln!("[db] using database at {}", path.display());
+                    }
+                    return Ok(be);
+                }
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
+            }
+        }
+
+        Err(format!(
+            "Could not open or create the local database in any location:\n{}",
+            errors.join("\n")
+        ))
+    }
+
+    /// Opens the DB at `path`, quarantining it once if it exists but fails
+    /// `PRAGMA quick_check`. A database that is merely locked or unreachable
+    /// is never renamed — the original error is returned so the caller can
+    /// try the next candidate directory.
+    fn open_or_recover(path: &std::path::Path) -> Result<Self, String> {
+        match Self::new(path) {
+            Ok(be) => Ok(be),
+            Err(first_err) => {
+                if path.exists() && Self::is_corrupt_sqlite(path) {
+                    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                    let suffix = format!(".corrupt-{stamp}");
+                    for p in [
+                        path.to_path_buf(),
+                        path.with_file_name(format!(
+                            "{}-wal",
+                            path.file_name().unwrap().to_string_lossy()
+                        )),
+                        path.with_file_name(format!(
+                            "{}-shm",
+                            path.file_name().unwrap().to_string_lossy()
+                        )),
+                    ] {
+                        if p.exists() {
+                            let quarantined = {
+                                let mut name = p.clone().into_os_string();
+                                name.push(&suffix);
+                                std::path::PathBuf::from(name)
+                            };
+                            let _ = std::fs::rename(&p, &quarantined);
+                        }
+                    }
+                    eprintln!(
+                        "[db] quarantined corrupt database at {} and retrying",
+                        path.display()
+                    );
+                    Self::new(path)
+                } else {
+                    Err(first_err)
+                }
+            }
+        }
+    }
+
+    /// True when the file at `path` is readable but not a valid SQLite
+    /// database (quick_check fails). Locked/permission failures return false.
+    fn is_corrupt_sqlite(path: &std::path::Path) -> bool {
+        use rusqlite::{ErrorCode, OpenFlags};
+        let corrupt_codes = [ErrorCode::NotADatabase, ErrorCode::DatabaseCorrupt];
+        let conn = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(c) => c,
+            Err(e) => {
+                return e
+                    .sqlite_error_code()
+                    .map(|c| corrupt_codes.contains(&c))
+                    .unwrap_or(false);
+            }
+        };
+        match conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)) {
+            Ok(result) => result != "ok",
+            Err(e) => e
+                .sqlite_error_code()
+                .map(|c| corrupt_codes.contains(&c))
+                .unwrap_or(false),
         }
     }
 }
@@ -740,5 +861,151 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("category no longer exists"));
+    }
+
+    /// Unique temp *directory* (as opposed to temp_db()'s file path).
+    fn temp_dir() -> std::path::PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!(
+            "mario_test_dir_{}_{}",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A sync_outbox table created by an older build (no pushed/attempts/
+    /// store_id columns) must gain them via the ALTER migrations.
+    #[test]
+    fn old_sync_outbox_schema_migrates() {
+        let path = temp_db();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sync_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                body TEXT
+            )",
+        )
+        .unwrap();
+        drop(conn);
+
+        let be = LocalBackend::new(&path).unwrap();
+        let conn = be.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('sync_outbox')").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for col in ["pushed", "attempts", "store_id"] {
+            assert!(cols.iter().any(|c| c == col), "missing column {col}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A corrupt DB file is renamed aside and a fresh one takes its place.
+    #[test]
+    fn corrupt_db_is_quarantined_and_recreated() {
+        let dir = temp_dir();
+        let db_path = dir.join(DB_FILE_NAME);
+        std::fs::write(&db_path, vec![0xABu8; 8192]).unwrap();
+
+        let be = LocalBackend::open_resilient(&[dir.clone()]).unwrap();
+        {
+            let conn = be.conn.lock().unwrap();
+            let store: String = conn
+                .query_row("SELECT name FROM stores WHERE id = '1'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(store, "Main Cafe");
+        }
+        drop(be);
+
+        let quarantined = std::fs::read_dir(&dir).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("mario_local.db.corrupt-")
+        });
+        assert!(quarantined, "corrupt file must be quarantined");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When the first candidate directory is unusable the next one is used.
+    #[test]
+    fn unusable_dir_falls_back_to_next_candidate() {
+        let base = temp_dir();
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"not a dir").unwrap();
+        let bad_dir = blocker.join("sub"); // cannot be created under a file
+        let good_dir = temp_dir();
+
+        let be =
+            LocalBackend::open_resilient(&[bad_dir.clone(), good_dir.clone()]).unwrap();
+        assert_eq!(be.db_path, good_dir.join(DB_FILE_NAME));
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&good_dir);
+    }
+
+    /// An existing DB in a later candidate wins over creating a fresh one
+    /// earlier in the list.
+    #[test]
+    fn existing_db_preferred_over_earlier_empty_candidate() {
+        let empty_dir = temp_dir();
+        let data_dir = temp_dir();
+        {
+            let be = LocalBackend::new(&data_dir.join(DB_FILE_NAME)).unwrap();
+            let conn = be.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO global_settings (key, value) VALUES ('marker', 'from-b')
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .unwrap();
+        }
+
+        let be =
+            LocalBackend::open_resilient(&[empty_dir.clone(), data_dir.clone()]).unwrap();
+        assert_eq!(be.db_path, data_dir.join(DB_FILE_NAME));
+        {
+            let conn = be.conn.lock().unwrap();
+            let marker: String = conn
+                .query_row(
+                    "SELECT value FROM global_settings WHERE key = 'marker'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(marker, "from-b");
+        }
+        drop(be);
+        assert!(!empty_dir.join(DB_FILE_NAME).exists());
+        let _ = std::fs::remove_dir_all(&empty_dir);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// A healthy DB must never be quarantined, even when reopened.
+    #[test]
+    fn healthy_db_never_quarantined() {
+        let dir = temp_dir();
+        let db_path = dir.join(DB_FILE_NAME);
+        {
+            let _be = LocalBackend::new(&db_path).unwrap();
+        }
+        let be = LocalBackend::open_resilient(&[dir.clone()]).unwrap();
+        assert_eq!(be.db_path, db_path);
+        drop(be);
+        let quarantined = std::fs::read_dir(&dir).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".corrupt-")
+        });
+        assert!(!quarantined, "healthy DB must not be quarantined");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
