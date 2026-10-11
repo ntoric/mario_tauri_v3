@@ -110,4 +110,4 @@ release: set-version
 	@echo "Creating and pushing tag v$(VERSION) ..."
 	@git tag -f v$(VERSION)
 	@git push origin v$(VERSION) -f
-	@echo "Release v$(VERSION) pushed. Monitor: https://github.com/ntoric/mario_tauri/actions"
+	@echo "Release v$(VERSION) pushed. Monitor: https://github.com/ntoric/mario_tauri_v3/actions"
