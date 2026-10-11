@@ -1,0 +1,58 @@
+[package]
+name = "mario-juicy"
+version = "1.13.0"
+description = "Mario Juicy POS System"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "mario_juicy_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+# Enable to use the Go mario-printer sidecar instead of the native Rust printer.
+# Build with: cargo build --features go-printer
+# The Go binary must be compiled separately and placed alongside the Tauri binary.
+go-printer = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+tauri-plugin-dialog = "2"
+dirs = "5"
+
+# Local backend (offline mode) — SQLite port of the Go backend
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+pbkdf2 = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+subtle = "2"
+bcrypt = "0.15"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# LAN server — exposes the embedded backend to mobile apps on the local network
+tokio = { version = "1", features = ["net", "sync", "time", "macros", "rt", "rt-multi-thread"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+
+# USB printer access (macOS/Linux only — not used on Windows or with go-printer)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rusb = "0.9"
+
