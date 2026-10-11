@@ -12,9 +12,17 @@ import (
 
 // GetItemExpenses handles GET /api/items/{itemId}/expenses
 func (h *Handler) GetItemExpenses(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	itemID := chi.URLParam(r, "itemId")
 	if itemID == "" {
 		h.writeError(w, http.StatusBadRequest, "Item ID required")
+		return
+	}
+	if !h.checkEntityAccess(w, r, claims, "items", itemID) {
 		return
 	}
 
@@ -52,12 +60,12 @@ func (h *Handler) CreateItemExpense(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetStoreID := req.StoreID
-	if targetStoreID == "" {
-		targetStoreID = claims.StoreID
+	targetStoreID, ok2 := h.resolveTargetStore(w, r, claims, req.StoreID)
+	if !ok2 {
+		return
 	}
-	if targetStoreID == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID required")
+	if !h.refInStore(r.Context(), "items", itemID, targetStoreID) {
+		h.writeError(w, http.StatusBadRequest, "Item does not belong to this store")
 		return
 	}
 
@@ -85,6 +93,9 @@ func (h *Handler) UpdateItemExpense(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := chi.URLParam(r, "id")
+	if !h.checkEntityAccess(w, r, claims, "item_expenses", id) {
+		return
+	}
 	var req models.ItemExpense
 	if err := h.readJSON(r, &req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
@@ -97,11 +108,8 @@ func (h *Handler) UpdateItemExpense(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.ID = id
-	storeID := req.StoreID
-	if storeID == "" {
-		storeID = claims.StoreID
-	}
-	req.StoreID = storeID
+	entityStore, _ := h.Repo.Store.EntityStoreID(r.Context(), "item_expenses", id)
+	req.StoreID = entityStore
 
 	if err := h.Repo.ItemExpense.Update(r.Context(), req); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
@@ -120,12 +128,12 @@ func (h *Handler) DeleteItemExpense(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := chi.URLParam(r, "id")
-	storeID := r.URL.Query().Get("storeId")
-	if storeID == "" {
-		storeID = claims.StoreID
+	if !h.checkEntityAccess(w, r, claims, "item_expenses", id) {
+		return
 	}
+	entityStore, _ := h.Repo.Store.EntityStoreID(r.Context(), "item_expenses", id)
 
-	if err := h.Repo.ItemExpense.Delete(r.Context(), id, storeID); err != nil {
+	if err := h.Repo.ItemExpense.Delete(r.Context(), id, entityStore); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -141,12 +149,8 @@ func (h *Handler) GetItemProfitReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	storeID := r.URL.Query().Get("storeId")
-	if storeID == "" {
-		storeID = claims.StoreID
-	}
-	if storeID == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID required")
+	storeID, ok2 := h.resolveTargetStore(w, r, claims, r.URL.Query().Get("storeId"))
+	if !ok2 {
 		return
 	}
 

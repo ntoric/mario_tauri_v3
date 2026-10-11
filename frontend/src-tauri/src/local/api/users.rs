@@ -2,7 +2,7 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 use super::rows;
-use super::{created, err, json_to_sql, now_ts, ok, entity_id, ApiResponse, Ctx};
+use super::{created, entity_id, err, json_to_sql, now_ts, ok, ApiResponse, Ctx};
 use crate::local::auth;
 
 const USER_COLS: &str =
@@ -23,6 +23,63 @@ fn get_user(conn: &rusqlite::Connection, id: &str) -> Option<(Value, String)> {
     .flatten()
 }
 
+/// Whether an owner-scope caller may manage `target`: target's primary store
+/// is one of the caller's stores, or they share a store via user_stores
+/// (owner-role users keep their memberships there, not in users.store_id).
+fn owner_can_manage(conn: &rusqlite::Connection, owner_id: &str, target: &Value) -> bool {
+    let tid = target["id"].as_str().unwrap_or("");
+    if tid == owner_id {
+        return true;
+    }
+    let tsid = target["storeId"].as_str().unwrap_or("");
+    if !tsid.is_empty() {
+        let owned = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM user_stores WHERE user_id = ?1 AND store_id = ?2)",
+                rusqlite::params![owner_id, tsid],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if owned {
+            return true;
+        }
+    }
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM user_stores t
+             JOIN user_stores o ON t.store_id = o.store_id
+             WHERE t.user_id = ?1 AND o.user_id = ?2)",
+        rusqlite::params![tid, owner_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
+/// Whether the caller may manage the given target user.
+fn can_manage_user(ctx: &Ctx<'_>, claims: &crate::local::auth::Claims, target: &Value) -> bool {
+    match claims.role.as_str() {
+        "superadmin" => true,
+        "business_owner" => owner_can_manage(&ctx.conn, &claims.id, target),
+        "business_admin" => {
+            let tsid = target["storeId"].as_str().unwrap_or("");
+            !tsid.is_empty() && tsid == claims.store_id
+        }
+        _ => false,
+    }
+}
+
+/// All store ids a caller may assign users to (empty vec = unrestricted for
+/// superadmin semantics; callers gate on role before using it).
+fn caller_store_ids(conn: &rusqlite::Connection, user_id: &str) -> Vec<String> {
+    let mut stmt = match conn.prepare("SELECT store_id FROM user_stores WHERE user_id = ?1") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map([user_id], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+}
+
 /// GET /api/users
 pub fn get_users(ctx: &mut Ctx) -> ApiResponse {
     let claims = match ctx.claims() {
@@ -41,7 +98,7 @@ pub fn get_users(ctx: &mut Ctx) -> ApiResponse {
             sql += " AND (u.store_id IN (SELECT store_id FROM user_stores WHERE user_id = ?1) OR u.id = ?1)";
             args.push(claims.id.clone());
         }
-        "business_admin" => {
+        "business_admin" | "staff" => {
             sql += " AND u.store_id = ?1";
             args.push(claims.store_id.clone());
         }
@@ -54,10 +111,9 @@ pub fn get_users(ctx: &mut Ctx) -> ApiResponse {
         Ok(s) => s,
         Err(e) => return err(500, e.to_string()),
     };
-    let users: Vec<Value> = match stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
-            Ok(rows::user_json(conn, r))
-        }) {
+    let users: Vec<Value> = match stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+        Ok(rows::user_json(conn, r))
+    }) {
         Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
         Err(e) => return err(500, e.to_string()),
     };
@@ -93,6 +149,22 @@ pub fn create_user(ctx: &mut Ctx, body: Value) -> ApiResponse {
             return err(403, "Can only assign users to your own store");
         }
         final_store_id = claims.store_id.clone();
+    }
+
+    // A business owner may only attach users to stores they own.
+    if claims.role == "business_owner" {
+        let owned = caller_store_ids(&ctx.conn, &claims.id);
+        let in_scope = |sid: &str| owned.iter().any(|o| o == sid);
+        if !final_store_id.is_empty() && !in_scope(&final_store_id) {
+            return err(403, "Can only assign users to your own stores");
+        }
+        if let Some(ids) = body["storeIds"].as_array() {
+            for sid in ids.iter().filter_map(|v| v.as_str()) {
+                if !in_scope(sid) {
+                    return err(403, "Can only assign users to your own stores");
+                }
+            }
+        }
     }
 
     let id = entity_id(&body);
@@ -162,6 +234,9 @@ pub fn update_user(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
+    if !["superadmin", "business_owner", "business_admin"].contains(&claims.role.as_str()) {
+        return err(403, "Not authorized");
+    }
 
     let (target_json, _) = match get_user(&ctx.conn, id) {
         Some(t) => t,
@@ -170,9 +245,40 @@ pub fn update_user(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
     if target_json["role"].as_str() == Some("superadmin") && claims.role != "superadmin" {
         return err(403, "Not authorized");
     }
+    if !can_manage_user(ctx, &claims, &target_json) {
+        return err(403, "Not authorized");
+    }
+
+    // Store reassignment must stay inside the caller's own scope.
+    let new_store_id = body["storeId"].as_str().unwrap_or("");
+    if claims.role == "business_admin"
+        && !new_store_id.is_empty()
+        && new_store_id != claims.store_id
+    {
+        return err(403, "Can only assign users to your own store");
+    }
+    if claims.role == "business_owner" {
+        let owned = caller_store_ids(&ctx.conn, &claims.id);
+        let in_scope = |sid: &str| owned.iter().any(|o| o == sid);
+        if !new_store_id.is_empty() && !in_scope(new_store_id) {
+            return err(403, "Can only assign users to your own stores");
+        }
+        if let Some(ids) = body["storeIds"].as_array() {
+            for sid in ids.iter().filter_map(|v| v.as_str()) {
+                if !in_scope(sid) {
+                    return err(403, "Can only assign users to your own stores");
+                }
+            }
+        }
+    }
 
     let mut fields: Vec<(&str, Value)> = Vec::new();
-    for (json_key, col) in [("name", "name"), ("email", "email"), ("isActive", "is_active"), ("storeId", "store_id")] {
+    for (json_key, col) in [
+        ("name", "name"),
+        ("email", "email"),
+        ("isActive", "is_active"),
+        ("storeId", "store_id"),
+    ] {
         if let Some(v) = body.get(json_key) {
             if !v.is_null() {
                 fields.push((col, v.clone()));
@@ -190,7 +296,11 @@ pub fn update_user(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
     let has_store_ids = body.get("storeIds").is_some();
     let store_ids: Vec<String> = body["storeIds"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let tx = match ctx.conn.transaction() {
@@ -245,6 +355,9 @@ pub fn delete_user(ctx: &mut Ctx, id: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
+    if !["superadmin", "business_owner", "business_admin"].contains(&claims.role.as_str()) {
+        return err(403, "Not authorized");
+    }
     if id == claims.id {
         return err(400, "Cannot delete yourself");
     }
@@ -256,15 +369,8 @@ pub fn delete_user(ctx: &mut Ctx, id: &str) -> ApiResponse {
     if target_json["role"].as_str() == Some("superadmin") {
         return err(403, "Cannot delete superadmin");
     }
-
-    if claims.role == "business_owner" {
-        let stores = rows::user_stores(&ctx.conn, &claims.id).unwrap_or_default();
-        let has_access = stores
-            .iter()
-            .any(|s| s["id"].as_str() == target_json["storeId"].as_str());
-        if !has_access && id != claims.id {
-            return err(403, "Not authorized");
-        }
+    if !can_manage_user(ctx, &claims, &target_json) {
+        return err(403, "Not authorized");
     }
 
     match ctx.conn.execute("DELETE FROM users WHERE id = ?1", [id]) {

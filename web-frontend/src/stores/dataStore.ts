@@ -26,6 +26,7 @@ interface DataState {
   initialize: () => Promise<void>;
   refreshData: (force?: boolean) => Promise<void>;
   clearCache: () => void;
+  reset: () => void;
   
   // Store management
   fetchStores: () => Promise<void>;
@@ -152,7 +153,10 @@ export const useDataStore = create<DataState>((set, get) => ({
         get().fetchTableSections(),
         get().fetchOrders(),
         get().fetchBills(),
+        get().fetchBillQueue(),
         get().fetchUsers(),
+        get().fetchExpenseCategories(),
+        get().fetchExpenses(),
       ]);
     } finally {
       set({ isLoading: false });
@@ -162,6 +166,27 @@ export const useDataStore = create<DataState>((set, get) => ({
   clearCache: () => {
     cache.clear();
     console.log('[DataStore] Cache cleared manually');
+  },
+
+  // Clears all store/session-scoped state. Called on logout and before a
+  // store switch so data from the previous tenant never renders.
+  reset: () => {
+    cache.clear();
+    set({
+      stores: [],
+      categories: [],
+      items: [],
+      tables: [],
+      tableSections: [],
+      orders: [],
+      bills: [],
+      billQueue: [],
+      users: [],
+      expenseCategories: [],
+      expenses: [],
+      isLoading: false,
+      isInitialized: false,
+    });
   },
 
   // Store management
@@ -206,14 +231,14 @@ export const useDataStore = create<DataState>((set, get) => ({
   switchStore: async (storeId) => {
     await api.switchStore(storeId);
     useAuthStore.getState().setCurrentStore(storeId);
-    
-    // Clear store-specific cache when switching stores
-    cache.deleteByPrefix('categories:');
-    cache.deleteByPrefix('items:');
-    cache.deleteByPrefix('orders:');
-    cache.deleteByPrefix('bills:');
-    
+
+    // Drop every cached entry — the stores list and the (role/store-scoped)
+    // users list are also affected by the switch — and empty all arrays so
+    // nothing from the previous store renders while the refetch runs.
+    get().reset();
+    await get().fetchStores();
     await get().refreshData();
+    set({ isInitialized: true });
   },
 
   // Categories
@@ -361,12 +386,18 @@ export const useDataStore = create<DataState>((set, get) => ({
 
   updateTable: async (id, table) => {
     const currentStoreId = useAuthStore.getState().currentStoreId;
+    if (!currentStoreId) {
+      throw new Error('Store not selected');
+    }
     await api.updateTable(id, table);
     await get().fetchTables();
   },
 
   deleteTable: async (id) => {
     const currentStoreId = useAuthStore.getState().currentStoreId;
+    if (!currentStoreId) {
+      throw new Error('Store not selected');
+    }
     await api.deleteTable(id);
     await get().fetchTables();
   },
@@ -656,11 +687,19 @@ export const useDataStore = create<DataState>((set, get) => ({
   },
 
   updateExpenseCategory: async (id, category) => {
+    const currentStoreId = useAuthStore.getState().currentStoreId;
+    if (!currentStoreId) {
+      throw new Error('Store not selected');
+    }
     await api.updateExpenseCategory(id, category);
     await get().fetchExpenseCategories();
   },
 
   deleteExpenseCategory: async (id) => {
+    const currentStoreId = useAuthStore.getState().currentStoreId;
+    if (!currentStoreId) {
+      throw new Error('Store not selected');
+    }
     await api.deleteExpenseCategory(id);
     await get().fetchExpenseCategories();
   },
@@ -692,11 +731,19 @@ export const useDataStore = create<DataState>((set, get) => ({
   },
 
   updateExpense: async (id, expense) => {
+    const currentStoreId = useAuthStore.getState().currentStoreId;
+    if (!currentStoreId) {
+      throw new Error('Store not selected');
+    }
     await api.updateExpense(id, expense);
     await get().fetchExpenses();
   },
 
   deleteExpense: async (id) => {
+    const currentStoreId = useAuthStore.getState().currentStoreId;
+    if (!currentStoreId) {
+      throw new Error('Store not selected');
+    }
     await api.deleteExpense(id);
     await get().fetchExpenses();
   },

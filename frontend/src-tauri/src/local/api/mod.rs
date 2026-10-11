@@ -1,10 +1,10 @@
 pub mod auth_handlers;
 pub mod bills;
-pub mod rows;
 pub mod catalog;
 pub mod expenses;
 pub mod menu;
 pub mod orders;
+pub mod rows;
 pub mod stores;
 pub mod system;
 pub mod tables;
@@ -176,9 +176,32 @@ pub fn notify(app: &AppHandle, state: &LocalBackend, store_id: &str, reason: &st
     }));
 }
 
+/// Whether the caller may read/write data belonging to `store_id`:
+/// superadmin → all stores, business_owner → stores in user_stores,
+/// business_admin/staff → only their assigned store.
+pub fn check_store_access(conn: &Connection, claims: &Claims, store_id: &str) -> bool {
+    match claims.role.as_str() {
+        "superadmin" => true,
+        "business_owner" => conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM user_stores WHERE user_id = ?1 AND store_id = ?2)",
+                rusqlite::params![claims.id, store_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false),
+        _ => !store_id.is_empty() && claims.store_id == store_id,
+    }
+}
+
 /// Resolve the storeId from the request/query, falling back to the caller's
 /// assigned store — mirrors the `targetStoreID` logic in the Go handlers.
-pub fn target_store(claims: &Claims, requested: &str) -> Result<String, ApiResponse> {
+/// The resolved store is verified against the caller's store access so a
+/// client cannot read or write another store's data by passing its id.
+pub fn target_store(
+    conn: &Connection,
+    claims: &Claims,
+    requested: &str,
+) -> Result<String, ApiResponse> {
     let id = if !requested.is_empty() {
         requested.to_string()
     } else {
@@ -187,7 +210,48 @@ pub fn target_store(claims: &Claims, requested: &str) -> Result<String, ApiRespo
     if id.is_empty() {
         return Err(err(400, "Store ID required"));
     }
+    if !check_store_access(conn, claims, &id) {
+        return Err(err(403, "Access denied to this store"));
+    }
     Ok(id)
+}
+
+/// Resolve + authorize in one step for handlers that take a raw storeId.
+pub fn authorize_store(ctx: &Ctx<'_>, requested: &str) -> Result<String, ApiResponse> {
+    let claims = ctx.claims()?.clone();
+    target_store(&ctx.conn, &claims, requested)
+}
+
+/// Which store owns a row in a store-scoped table. `table` is always a fixed
+/// literal from call sites (never user input), so interpolation is safe.
+/// Returns None when the row doesn't exist or has no store.
+pub fn entity_store_id(conn: &Connection, table: &str, id: &str) -> Option<String> {
+    conn.query_row(
+        &format!("SELECT store_id FROM {} WHERE id = ?1", table),
+        [id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// Verify the caller may touch the entity identified by `table`/`id`: the
+/// row's store must be one the caller can access. 404 when the entity does
+/// not exist, 403 when it belongs to an inaccessible store.
+pub fn require_entity_access(ctx: &Ctx<'_>, table: &str, id: &str) -> Result<(), ApiResponse> {
+    let claims = ctx.claims()?.clone();
+    match entity_store_id(&ctx.conn, table, id) {
+        Some(sid) if check_store_access(&ctx.conn, &claims, &sid) => Ok(()),
+        Some(_) => Err(err(403, "Access denied to this store")),
+        None => Err(err(404, "Not found")),
+    }
+}
+
+/// Verify a referenced entity exists AND belongs to the given store —
+/// prevents cross-store foreign keys (e.g. store A's order pointing at
+/// store B's table or items).
+pub fn ref_in_store(conn: &Connection, table: &str, id: &str, store_id: &str) -> bool {
+    entity_store_id(conn, table, id).as_deref() == Some(store_id)
 }
 
 pub fn require_claims(state: &LocalBackend, token: &Option<String>) -> Result<Claims, ApiResponse> {
@@ -243,10 +307,7 @@ fn parse_query(path: &str) -> (String, HashMap<String, String>) {
             Some((k, v)) => (k, v),
             None => (pair, ""),
         };
-        params.insert(
-            urldecode(k),
-            urldecode(v),
-        );
+        params.insert(urldecode(k), urldecode(v));
     }
     (p, params)
 }
@@ -285,11 +346,7 @@ fn q<'a>(query: &'a HashMap<String, String>, key: &str) -> &'a str {
 }
 
 /// Main entry: dispatch an HTTP-like request to the local handler.
-pub async fn dispatch(
-    state: &LocalBackend,
-    app: &AppHandle,
-    req: ApiRequest,
-) -> ApiResponse {
+pub async fn dispatch(state: &LocalBackend, app: &AppHandle, req: ApiRequest) -> ApiResponse {
     let broadcast = |store_id: &str, reason: &str| notify(app, state, store_id, reason);
     dispatch_impl(state, req, &broadcast).await
 }
@@ -428,9 +485,7 @@ pub async fn dispatch_impl_ex(
         ("POST", ["items"]) => catalog::create_item(&mut ctx, body),
         ("PUT", ["items", id]) => catalog::update_item(&mut ctx, id, body),
         ("DELETE", ["items", id]) => catalog::delete_item(&mut ctx, id),
-        ("GET", ["items", item_id, "expenses"]) => {
-            catalog::get_item_expenses(&mut ctx, item_id)
-        }
+        ("GET", ["items", item_id, "expenses"]) => catalog::get_item_expenses(&mut ctx, item_id),
         ("POST", ["items", item_id, "expenses"]) => {
             catalog::create_item_expense(&mut ctx, item_id, body)
         }
@@ -484,9 +539,7 @@ pub async fn dispatch_impl_ex(
         ("GET", ["support-config"]) => system::get_support_config(&mut ctx),
         ("POST", ["support-config"]) => system::update_support_config(&mut ctx, body),
         ("GET", ["system", "update-config"]) => system::get_update_repo_config(&mut ctx),
-        ("POST", ["system", "update-config"]) => {
-            system::update_update_repo_config(&mut ctx, body)
-        }
+        ("POST", ["system", "update-config"]) => system::update_update_repo_config(&mut ctx, body),
         ("GET", ["system", "gemini-config"]) => menu::get_gemini_config(&mut ctx),
         ("POST", ["system", "gemini-config"]) => menu::update_gemini_config(&mut ctx, body),
         ("POST", ["menu", "bulk"]) => menu::bulk_create_menu(&mut ctx, body),
@@ -629,13 +682,7 @@ fn is_sync_exempt(segs: &[&str]) -> bool {
 /// Insert a mutation into the sync outbox directly — used by composite
 /// operations (e.g. bulk menu import) that expand one API call into several
 /// canonical CRUD events so the cloud replays them convergently.
-pub fn queue_sync_event(
-    conn: &Connection,
-    method: &str,
-    path: &str,
-    body: &Value,
-    store_id: &str,
-) {
+pub fn queue_sync_event(conn: &Connection, method: &str, path: &str, body: &Value, store_id: &str) {
     let ts = now_ts();
     let _ = conn.execute(
         "INSERT INTO sync_outbox (event_id, method, path, body, store_id, created_at)

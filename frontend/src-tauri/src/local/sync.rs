@@ -165,7 +165,10 @@ pub fn local_only_mode(conn: &Connection) -> bool {
 // ---------------------------------------------------------------------------
 
 pub enum CloudLogin {
-    Success { token: String, user: Value },
+    Success {
+        token: String,
+        user: Value,
+    },
     /// The cloud explicitly rejected the credentials (4xx).
     Invalid(String),
     /// Cloud unreachable — caller should fall back to local auth.
@@ -352,76 +355,146 @@ fn clear_cloud_token(conn: &Connection) {
 type ColMap = &'static [(&'static str, &'static str)];
 
 const STORE_COLS: ColMap = &[
-    ("id", "id"), ("name", "name"), ("branch", "branch"), ("location", "location"),
-    ("gstin", "gstin"), ("fssaiNo", "fssai_no"), ("phone", "phone"),
-    ("printerName", "printer_name"), ("printerVendorId", "printer_vendor_id"),
-    ("printerProductId", "printer_product_id"), ("invoiceSize", "invoice_size"),
-    ("kotPrintEnabled", "kot_print_enabled"), ("remoteBillingEnabled", "remote_billing_enabled"),
-    ("logoUrl", "logo_url"), ("themeColor", "theme_color"),
-    ("taxEnabled", "tax_enabled"), ("defaultTaxPercent", "default_tax_percent"),
-    ("isActive", "is_active"), ("createdAt", "created_at"),
+    ("id", "id"),
+    ("name", "name"),
+    ("branch", "branch"),
+    ("location", "location"),
+    ("gstin", "gstin"),
+    ("fssaiNo", "fssai_no"),
+    ("phone", "phone"),
+    ("printerName", "printer_name"),
+    ("printerVendorId", "printer_vendor_id"),
+    ("printerProductId", "printer_product_id"),
+    ("invoiceSize", "invoice_size"),
+    ("kotPrintEnabled", "kot_print_enabled"),
+    ("remoteBillingEnabled", "remote_billing_enabled"),
+    ("logoUrl", "logo_url"),
+    ("themeColor", "theme_color"),
+    ("taxEnabled", "tax_enabled"),
+    ("defaultTaxPercent", "default_tax_percent"),
+    ("isActive", "is_active"),
+    ("createdAt", "created_at"),
 ];
 
 const CATEGORY_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("name", "name"), ("description", "description"),
-    ("isActive", "is_active"), ("enabled", "enabled"), ("isFavourite", "is_favourite"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("name", "name"),
+    ("description", "description"),
+    ("isActive", "is_active"),
+    ("enabled", "enabled"),
+    ("isFavourite", "is_favourite"),
     ("createdAt", "created_at"),
 ];
 
 const ITEM_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("categoryId", "category_id"), ("name", "name"),
-    ("description", "description"), ("price", "price"), ("hsnCode", "hsn_code"),
-    ("taxPercent", "tax_percent"), ("isActive", "is_active"), ("enabled", "enabled"),
-    ("isFavourite", "is_favourite"), ("createdAt", "created_at"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("categoryId", "category_id"),
+    ("name", "name"),
+    ("description", "description"),
+    ("price", "price"),
+    ("hsnCode", "hsn_code"),
+    ("taxPercent", "tax_percent"),
+    ("isActive", "is_active"),
+    ("enabled", "enabled"),
+    ("isFavourite", "is_favourite"),
+    ("createdAt", "created_at"),
 ];
 
 const ITEM_EXPENSE_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("itemId", "item_id"), ("name", "name"),
-    ("description", "description"), ("amount", "amount"), ("isActive", "is_active"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("itemId", "item_id"),
+    ("name", "name"),
+    ("description", "description"),
+    ("amount", "amount"),
+    ("isActive", "is_active"),
     ("createdAt", "created_at"),
 ];
 
 const SECTION_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("name", "name"), ("createdAt", "created_at"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("name", "name"),
+    ("createdAt", "created_at"),
 ];
 
 const ORDER_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("tableId", "table_id"),
-    ("tableNumber", "table_number"), ("status", "status"), ("orderType", "order_type"),
-    ("customerName", "customer_name"), ("customerMobile", "customer_mobile"),
-    ("totalAmount", "total_amount"), ("taxAmount", "tax_amount"),
-    ("discountAmount", "discount_amount"), ("paymentMethod", "payment_method"),
-    ("paymentStatus", "payment_status"), ("createdBy", "created_by"),
-    ("createdAt", "created_at"), ("updatedAt", "updated_at"), ("cancelledAt", "cancelled_at"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("tableId", "table_id"),
+    ("tableNumber", "table_number"),
+    ("status", "status"),
+    ("orderType", "order_type"),
+    ("customerName", "customer_name"),
+    ("customerMobile", "customer_mobile"),
+    ("totalAmount", "total_amount"),
+    ("taxAmount", "tax_amount"),
+    ("discountAmount", "discount_amount"),
+    ("paymentMethod", "payment_method"),
+    ("paymentStatus", "payment_status"),
+    ("createdBy", "created_by"),
+    ("createdAt", "created_at"),
+    ("updatedAt", "updated_at"),
+    ("cancelledAt", "cancelled_at"),
 ];
 
 const BILL_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("orderId", "order_id"),
-    ("tableNumber", "table_number"), ("invoiceNo", "invoice_no"), ("subtotal", "subtotal"),
-    ("taxTotal", "tax_total"), ("discount", "discount"), ("total", "total"),
-    ("paymentMethod", "payment_method"), ("customerName", "customer_name"),
-    ("customerMobile", "customer_mobile"), ("isPrinted", "is_printed"),
-    ("status", "status"), ("generatedAt", "generated_at"), ("generatedBy", "generated_by"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("orderId", "order_id"),
+    ("tableNumber", "table_number"),
+    ("invoiceNo", "invoice_no"),
+    ("subtotal", "subtotal"),
+    ("taxTotal", "tax_total"),
+    ("discount", "discount"),
+    ("total", "total"),
+    ("paymentMethod", "payment_method"),
+    ("customerName", "customer_name"),
+    ("customerMobile", "customer_mobile"),
+    ("isPrinted", "is_printed"),
+    ("status", "status"),
+    ("generatedAt", "generated_at"),
+    ("generatedBy", "generated_by"),
 ];
 
 const BILL_QUEUE_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("orderId", "order_id"),
-    ("billData", "bill_data"), ("status", "status"), ("errorMessage", "error_message"),
-    ("createdAt", "created_at"), ("updatedAt", "updated_at"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("orderId", "order_id"),
+    ("billData", "bill_data"),
+    ("status", "status"),
+    ("errorMessage", "error_message"),
+    ("createdAt", "created_at"),
+    ("updatedAt", "updated_at"),
 ];
 
 const EXPENSE_CAT_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("name", "name"), ("description", "description"),
-    ("isActive", "is_active"), ("createdAt", "created_at"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("name", "name"),
+    ("description", "description"),
+    ("isActive", "is_active"),
+    ("createdAt", "created_at"),
 ];
 
 const EXPENSE_COLS: ColMap = &[
-    ("id", "id"), ("storeId", "store_id"), ("categoryId", "category_id"),
-    ("title", "title"), ("description", "description"), ("amount", "amount"),
-    ("expenseDate", "expense_date"), ("paymentMethod", "payment_method"),
-    ("receiptNumber", "receipt_number"), ("vendor", "vendor"),
-    ("attachments", "attachments"), ("isActive", "is_active"),
-    ("createdAt", "created_at"), ("updatedAt", "updated_at"), ("createdBy", "created_by"),
+    ("id", "id"),
+    ("storeId", "store_id"),
+    ("categoryId", "category_id"),
+    ("title", "title"),
+    ("description", "description"),
+    ("amount", "amount"),
+    ("expenseDate", "expense_date"),
+    ("paymentMethod", "payment_method"),
+    ("receiptNumber", "receipt_number"),
+    ("vendor", "vendor"),
+    ("attachments", "attachments"),
+    ("isActive", "is_active"),
+    ("createdAt", "created_at"),
+    ("updatedAt", "updated_at"),
+    ("createdBy", "created_by"),
 ];
 
 /// INSERT … ON CONFLICT(id) DO UPDATE for a cloud JSON row. `pre` lets callers
@@ -482,8 +555,12 @@ fn upsert_table(conn: &Connection, row: &Value) {
         "tables",
         row,
         &[
-            ("id", "id"), ("storeId", "store_id"), ("number", "number"),
-            ("seats", "seats"), ("isActive", "is_active"), ("section", "section"),
+            ("id", "id"),
+            ("storeId", "store_id"),
+            ("number", "number"),
+            ("seats", "seats"),
+            ("isActive", "is_active"),
+            ("section", "section"),
         ],
         &[("position_x", x), ("position_y", y)],
     );
@@ -544,8 +621,13 @@ fn upsert_user(conn: &Connection, row: &Value) {
         "users",
         row,
         &[
-            ("id", "id"), ("username", "username"), ("name", "name"), ("email", "email"),
-            ("role", "role"), ("storeId", "store_id"), ("isActive", "is_active"),
+            ("id", "id"),
+            ("username", "username"),
+            ("name", "name"),
+            ("email", "email"),
+            ("role", "role"),
+            ("storeId", "store_id"),
+            ("isActive", "is_active"),
             ("createdAt", "created_at"),
         ],
         &[("password", Value::String(String::new()))],
@@ -613,7 +695,10 @@ async fn cloud_get(
 pub async fn pull_snapshot(state: &LocalBackend) -> Result<(), String> {
     let (base, store_id) = {
         let conn = state.conn.lock().unwrap();
-        (cloud_base(&conn), get_setting(&conn, "cloud_store_id").unwrap_or_default())
+        (
+            cloud_base(&conn),
+            get_setting(&conn, "cloud_store_id").unwrap_or_default(),
+        )
     };
     if store_id.is_empty() {
         return Err("no store selected".to_string());
@@ -626,9 +711,14 @@ pub async fn pull_snapshot(state: &LocalBackend) -> Result<(), String> {
     // on the cloud after this point is picked up by incremental event pulls,
     // so the snapshot can't silently miss it.
     let cursor = if last_seq(state).is_none() {
-        cloud_get(state, &base, &mut token, "/api/sync/events?since=-1&storeId=")
-            .await
-            .and_then(|v| v["latest"].as_i64())
+        cloud_get(
+            state,
+            &base,
+            &mut token,
+            "/api/sync/events?since=-1&storeId=",
+        )
+        .await
+        .and_then(|v| v["latest"].as_i64())
     } else {
         None
     };
@@ -638,15 +728,69 @@ pub async fn pull_snapshot(state: &LocalBackend) -> Result<(), String> {
 
     // Fetch all collections first (network), then write under one DB lock.
     let store = cloud_get(state, &base, &mut token, &format!("/api/stores/{}", sid)).await;
-    let categories = cloud_get(state, &base, &mut token, &format!("/api/categories?storeId={}", sid)).await;
-    let items = cloud_get(state, &base, &mut token, &format!("/api/items?storeId={}", sid)).await;
-    let tables = cloud_get(state, &base, &mut token, &format!("/api/tables?storeId={}", sid)).await;
-    let sections = cloud_get(state, &base, &mut token, &format!("/api/tables/sections?storeId={}", sid)).await;
-    let orders = cloud_get(state, &base, &mut token, &format!("/api/orders?storeId={}", sid)).await;
-    let bills = cloud_get(state, &base, &mut token, &format!("/api/bills?storeId={}", sid)).await;
-    let bill_queue = cloud_get(state, &base, &mut token, &format!("/api/bills/queue?storeId={}", sid)).await;
-    let expense_cats = cloud_get(state, &base, &mut token, &format!("/api/expense-categories?storeId={}", sid)).await;
-    let expenses = cloud_get(state, &base, &mut token, &format!("/api/expenses?storeId={}", sid)).await;
+    let categories = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/categories?storeId={}", sid),
+    )
+    .await;
+    let items = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/items?storeId={}", sid),
+    )
+    .await;
+    let tables = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/tables?storeId={}", sid),
+    )
+    .await;
+    let sections = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/tables/sections?storeId={}", sid),
+    )
+    .await;
+    let orders = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/orders?storeId={}", sid),
+    )
+    .await;
+    let bills = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/bills?storeId={}", sid),
+    )
+    .await;
+    let bill_queue = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/bills/queue?storeId={}", sid),
+    )
+    .await;
+    let expense_cats = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/expense-categories?storeId={}", sid),
+    )
+    .await;
+    let expenses = cloud_get(
+        state,
+        &base,
+        &mut token,
+        &format!("/api/expenses?storeId={}", sid),
+    )
+    .await;
     let users = cloud_get(state, &base, &mut token, "/api/users").await;
 
     // Item expenses are per-item on the API.
@@ -689,18 +833,28 @@ pub async fn pull_snapshot(state: &LocalBackend) -> Result<(), String> {
         // FK-safe order: stores → users → categories → items → item_expenses
         // → sections → tables → orders → bills → queue → expense_cats → expenses.
         apply(&users, &|c, r| upsert_user(c, r));
-        apply(&categories, &|c, r| upsert_row(c, "categories", r, CATEGORY_COLS, &[]));
+        apply(&categories, &|c, r| {
+            upsert_row(c, "categories", r, CATEGORY_COLS, &[])
+        });
         apply(&items, &|c, r| upsert_row(c, "items", r, ITEM_COLS, &[]));
         for r in &item_expenses {
             upsert_row(&conn, "item_expenses", r, ITEM_EXPENSE_COLS, &[]);
         }
-        apply(&sections, &|c, r| upsert_row(c, "table_sections", r, SECTION_COLS, &[]));
+        apply(&sections, &|c, r| {
+            upsert_row(c, "table_sections", r, SECTION_COLS, &[])
+        });
         apply(&tables, &|c, r| upsert_table(c, r));
         apply(&orders, &|c, r| upsert_order(c, r));
         apply(&bills, &|c, r| upsert_bill(c, r));
-        apply(&bill_queue, &|c, r| upsert_row(c, "bill_queue", r, BILL_QUEUE_COLS, &[]));
-        apply(&expense_cats, &|c, r| upsert_row(c, "expense_categories", r, EXPENSE_CAT_COLS, &[]));
-        apply(&expenses, &|c, r| upsert_row(c, "expenses", r, EXPENSE_COLS, &[]));
+        apply(&bill_queue, &|c, r| {
+            upsert_row(c, "bill_queue", r, BILL_QUEUE_COLS, &[])
+        });
+        apply(&expense_cats, &|c, r| {
+            upsert_row(c, "expense_categories", r, EXPENSE_CAT_COLS, &[])
+        });
+        apply(&expenses, &|c, r| {
+            upsert_row(c, "expenses", r, EXPENSE_COLS, &[])
+        });
         set_setting(&conn, "cloud_last_snapshot", &super::db::now_ts());
         // Remember which store this snapshot covered — a store switch makes
         // the next sync cycle re-snapshot for the new scope.
@@ -783,10 +937,8 @@ async fn push_outbox(state: &LocalBackend, token: &mut String, base: &str) {
             match resp {
                 Ok(r) if r.status().as_u16() == 200 => {
                     let conn = state.conn.lock().unwrap();
-                    let _ = conn.execute(
-                        "UPDATE sync_outbox SET pushed = 1 WHERE id = ?1",
-                        [row_id],
-                    );
+                    let _ =
+                        conn.execute("UPDATE sync_outbox SET pushed = 1 WHERE id = ?1", [row_id]);
                     break;
                 }
                 Ok(r) if r.status().as_u16() == 401 && !retried => {
@@ -850,8 +1002,11 @@ fn last_seq(state: &LocalBackend) -> Option<i64> {
     get_setting(&conn, "cloud_last_seq").and_then(|s| s.parse().ok())
 }
 
-/// Mint a local JWT for the cached cloud user so replayed events satisfy the
-/// normal auth checks (and writes get the right created_by/store).
+/// Mint a local JWT so replayed events satisfy the normal auth checks (and
+/// writes get the right created_by). The replay principal is superadmin:
+/// pulled events were already authorized by the cloud, so replaying them
+/// with the logged-in user's role would 403 on legitimate cloud-originated
+/// changes (user admin, store config) and diverge the local copy.
 fn internal_token(state: &LocalBackend) -> Option<String> {
     let conn = state.conn.lock().unwrap();
     let uid = get_setting(&conn, "cloud_user_id").unwrap_or_default();
@@ -859,10 +1014,13 @@ fn internal_token(state: &LocalBackend) -> Option<String> {
         return None;
     }
     let username = get_setting(&conn, "cloud_username").unwrap_or_default();
-    let role = get_setting(&conn, "cloud_role").unwrap_or_else(|| "staff".into());
     let store_id = get_setting(&conn, "cloud_store_id").unwrap_or_default();
     drop(conn);
-    auth::generate_token(&auth::new_claims(&uid, &username, &role, &store_id), &state.jwt_secret).ok()
+    auth::generate_token(
+        &auth::new_claims(&uid, &username, "superadmin", &store_id),
+        &state.jwt_secret,
+    )
+    .ok()
 }
 
 async fn pull_events(
@@ -922,7 +1080,11 @@ async fn pull_events(
         let seq = ev["seq"].as_i64().unwrap_or(0);
         let method = ev["method"].as_str().unwrap_or("").to_string();
         let path = ev["path"].as_str().unwrap_or("").to_string();
-        let ev_body = if ev["body"].is_null() { None } else { Some(ev["body"].clone()) };
+        let ev_body = if ev["body"].is_null() {
+            None
+        } else {
+            Some(ev["body"].clone())
+        };
         let ev_ts = ev["createdAt"].as_str().unwrap_or("").to_string();
         if method.is_empty() || path.is_empty() {
             continue;

@@ -2,8 +2,9 @@ use serde_json::{json, Value};
 
 use super::rows::{self, ItemsKind};
 use super::{
-    broadcast_table_status, coerce_text, created, err, missing_ref, now_ts, ok, target_store,
-    entity_id, ApiResponse, Ctx,
+    broadcast_table_status, check_store_access, coerce_text, created, entity_id, entity_store_id,
+    err, missing_ref, now_ts, ok, ref_in_store, require_entity_access, target_store, ApiResponse,
+    Ctx,
 };
 
 /// Pre-validate the foreign keys an order write depends on so stale client
@@ -30,6 +31,11 @@ fn check_order_refs(
                 "The selected table no longer exists. Refresh and choose another table.",
             ));
         }
+        if let Some(sid) = store_id {
+            if !ref_in_store(conn, "tables", tid, sid) {
+                return Some(err(400, "The selected table belongs to another store."));
+            }
+        }
     }
     for item in items {
         let iid = item["itemId"].as_str().unwrap_or("");
@@ -44,6 +50,14 @@ fn check_order_refs(
                 }
             };
             return Some(err(400, msg));
+        }
+        if let Some(sid) = store_id {
+            if !ref_in_store(conn, "items", iid, sid) {
+                return Some(err(
+                    400,
+                    "A menu item in this order belongs to another store.",
+                ));
+            }
         }
     }
     None
@@ -109,9 +123,9 @@ fn insert_order(
                 .filter(|s| !s.is_empty())
                 .map(String::from);
             // Go uses the nested item price/tax on create.
-            let price = item["item"]["price"].as_f64().unwrap_or_else(|| {
-                item["unitPrice"].as_f64().unwrap_or(0.0)
-            });
+            let price = item["item"]["price"]
+                .as_f64()
+                .unwrap_or_else(|| item["unitPrice"].as_f64().unwrap_or(0.0));
             let tax = item["item"]["taxPercent"]
                 .as_f64()
                 .unwrap_or_else(|| item["taxPercent"].as_f64().unwrap_or(0.0));
@@ -132,7 +146,11 @@ fn insert_order(
     Ok(())
 }
 
-fn complete_order_tx(conn: &rusqlite::Connection, id: &str, payment_method: &str) -> Result<(), rusqlite::Error> {
+fn complete_order_tx(
+    conn: &rusqlite::Connection,
+    id: &str,
+    payment_method: &str,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE orders SET status = 'completed', payment_status = 'paid', payment_method = ?1, updated_at = ?2 WHERE id = ?3",
         rusqlite::params![payment_method, now_ts(), id],
@@ -185,7 +203,7 @@ pub fn get_orders(ctx: &mut Ctx, store_id: &str, status: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -220,7 +238,10 @@ pub fn get_orders(ctx: &mut Ctx, store_id: &str, status: &str) -> ApiResponse {
         o["items"] = json!(items_map.remove(id).unwrap_or_default());
     }
 
-    ok(json!(orders.into_iter().map(|(_, o)| o).collect::<Vec<_>>()))
+    ok(json!(orders
+        .into_iter()
+        .map(|(_, o)| o)
+        .collect::<Vec<_>>()))
 }
 
 /// POST /api/orders
@@ -229,7 +250,7 @@ pub fn create_order(ctx: &mut Ctx, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -295,13 +316,27 @@ pub fn update_order(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
 
     // A stale client may hold an order that was completed/removed elsewhere —
     // writing its items would hit the FK on orders(id). Check refs first.
-    if missing_ref(&ctx.conn, "orders", id) {
-        return err(
-            404,
-            "Order not found — it may have been completed or removed. Refresh and try again.",
-        );
+    let order_store =
+        match entity_store_id(&ctx.conn, "orders", id) {
+            Some(s) => s,
+            None => return err(
+                404,
+                "Order not found — it may have been completed or removed. Refresh and try again.",
+            ),
+        };
+    let claims = match ctx.claims() {
+        Ok(c) => c.clone(),
+        Err(r) => return r,
+    };
+    if !check_store_access(&ctx.conn, &claims, &order_store) {
+        return err(403, "Access denied to this store");
     }
-    if let Some(r) = check_order_refs(&ctx.conn, None, body["tableId"].as_str(), &items) {
+    if let Some(r) = check_order_refs(
+        &ctx.conn,
+        Some(&order_store),
+        body["tableId"].as_str(),
+        &items,
+    ) {
         return r;
     }
 
@@ -385,6 +420,9 @@ pub fn update_order(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
 
 /// PATCH /api/orders/:id/complete
 pub fn complete_order(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "orders", id) {
+        return r;
+    }
     let payment_method = body["paymentMethod"].as_str().unwrap_or("");
     if let Err(e) = complete_order_tx(&ctx.conn, id, payment_method) {
         return err(500, e.to_string());
@@ -408,6 +446,17 @@ pub fn cancel_order(ctx: &mut Ctx, id: &str) -> ApiResponse {
     };
     if existing["status"].as_str() == Some("cancelled") {
         return err(400, "Order is already cancelled");
+    }
+    let claims = match ctx.claims() {
+        Ok(c) => c.clone(),
+        Err(r) => return r,
+    };
+    if !check_store_access(
+        &ctx.conn,
+        &claims,
+        existing["storeId"].as_str().unwrap_or(""),
+    ) {
+        return err(403, "Access denied to this store");
     }
 
     let tx = match ctx.conn.transaction() {
@@ -447,7 +496,7 @@ pub fn save_ebill(ctx: &mut Ctx, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -466,7 +515,11 @@ pub fn save_ebill(ctx: &mut Ctx, body: Value) -> ApiResponse {
     let invoice_no = format!("INV-{}", chrono::Utc::now().timestamp());
     let payment_method = {
         let p = body["paymentMethod"].as_str().unwrap_or("");
-        if p.is_empty() { "upi".to_string() } else { p.to_string() }
+        if p.is_empty() {
+            "upi".to_string()
+        } else {
+            p.to_string()
+        }
     };
     let subtotal = body["totalAmount"].as_f64().unwrap_or(0.0);
     let tax = body["taxAmount"].as_f64().unwrap_or(0.0);
@@ -488,9 +541,18 @@ pub fn save_ebill(ctx: &mut Ctx, body: Value) -> ApiResponse {
             return err(500, e.to_string());
         }
         if let Err(e) = create_bill_tx(
-            &tx, &target, &order_id, &invoice_no, &body, &claims.id,
-            subtotal, tax, discount, subtotal + tax - discount,
-            &payment_method, &table_number,
+            &tx,
+            &target,
+            &order_id,
+            &invoice_no,
+            &body,
+            &claims.id,
+            subtotal,
+            tax,
+            discount,
+            subtotal + tax - discount,
+            &payment_method,
+            &table_number,
         ) {
             return err(500, e.to_string());
         }
@@ -518,7 +580,7 @@ pub fn save_print(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -528,6 +590,11 @@ pub fn save_print(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
         Ok(None) => return err(404, "Order not found"),
         Err(e) => return err(500, e.to_string()),
     };
+    // The bill must land in the same store as the order — the client may not
+    // mint a bill in store A that settles an order from store B.
+    if order["storeId"].as_str().unwrap_or("") != target {
+        return err(400, "Order does not belong to this store");
+    }
 
     let invoice_no = {
         let v = body["invoiceNo"].as_str().unwrap_or("");
@@ -539,7 +606,11 @@ pub fn save_print(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
     };
     let payment_method = {
         let p = body["paymentMethod"].as_str().unwrap_or("");
-        if p.is_empty() { "upi".to_string() } else { p.to_string() }
+        if p.is_empty() {
+            "upi".to_string()
+        } else {
+            p.to_string()
+        }
     };
 
     {
@@ -548,7 +619,12 @@ pub fn save_print(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
             Err(e) => return err(500, e.to_string()),
         };
         if let Err(e) = create_bill_tx(
-            &tx, &target, id, &invoice_no, &body, &claims.id,
+            &tx,
+            &target,
+            id,
+            &invoice_no,
+            &body,
+            &claims.id,
             body["subtotal"].as_f64().unwrap_or(0.0),
             body["taxTotal"].as_f64().unwrap_or(0.0),
             body["discount"].as_f64().unwrap_or(0.0),
@@ -585,7 +661,7 @@ pub fn create_parcel_order(ctx: &mut Ctx, mut body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -625,9 +701,18 @@ pub fn create_parcel_order(ctx: &mut Ctx, mut body: Value) -> ApiResponse {
             return err(500, e.to_string());
         }
         if let Err(e) = create_bill_tx(
-            &tx, &target, &order_id, &invoice_no, &body, &claims.id,
-            subtotal, tax, discount, subtotal + tax - discount,
-            &payment_method, "0",
+            &tx,
+            &target,
+            &order_id,
+            &invoice_no,
+            &body,
+            &claims.id,
+            subtotal,
+            tax,
+            discount,
+            subtotal + tax - discount,
+            &payment_method,
+            "0",
         ) {
             return err(500, e.to_string());
         }

@@ -1,8 +1,11 @@
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
-use super::{broadcast_table_status, coerce_text, created, err, missing_ref, ok, target_store, entity_id, ApiResponse, Ctx};
 use super::rows::txt;
+use super::{
+    broadcast_table_status, check_store_access, coerce_text, created, entity_id, err, missing_ref,
+    ok, require_entity_access, target_store, ApiResponse, Ctx,
+};
 
 fn table_json(r: &rusqlite::Row) -> Result<Value, rusqlite::Error> {
     let mut t = json!({
@@ -30,7 +33,7 @@ pub fn get_tables(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -55,13 +58,16 @@ pub fn create_table(ctx: &mut Ctx, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
 
     if missing_ref(&ctx.conn, "stores", &target) {
-        return err(400, "Store is not synced on this device. Sign in again to resync.");
+        return err(
+            400,
+            "Store is not synced on this device. Sign in again to resync.",
+        );
     }
 
     let id = entity_id(&body);
@@ -98,6 +104,9 @@ pub fn create_table(ctx: &mut Ctx, body: Value) -> ApiResponse {
 
 /// PUT /api/tables/:id
 pub fn update_table(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "tables", id) {
+        return r;
+    }
     let section: Option<String> = body["section"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -129,10 +138,22 @@ pub fn update_table(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
 pub fn delete_table(ctx: &mut Ctx, id: &str) -> ApiResponse {
     let store_id: Option<String> = ctx
         .conn
-        .query_row("SELECT store_id FROM tables WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT store_id FROM tables WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .optional()
         .ok()
         .flatten();
+
+    if let Some(sid) = store_id.as_deref() {
+        let claims = match ctx.claims() {
+            Ok(c) => c.clone(),
+            Err(r) => return r,
+        };
+        if !check_store_access(&ctx.conn, &claims, sid) {
+            return err(403, "Access denied to this store");
+        }
+    }
 
     match ctx.conn.execute("DELETE FROM tables WHERE id = ?1", [id]) {
         Ok(_) => {
@@ -151,7 +172,7 @@ pub fn get_sections(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -186,7 +207,7 @@ pub fn create_section(ctx: &mut Ctx, body: Value) -> ApiResponse {
     if name.is_empty() {
         return err(400, "Section name is required");
     }
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -216,7 +237,7 @@ pub fn rename_section(ctx: &mut Ctx, body: Value) -> ApiResponse {
         return err(400, "New section name is required");
     }
     let old_name = body["oldName"].as_str().unwrap_or("");
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -256,7 +277,7 @@ pub fn delete_section(ctx: &mut Ctx, name: &str, store_id: &str) -> ApiResponse 
     if name.is_empty() {
         return err(400, "Section name required");
     }
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };

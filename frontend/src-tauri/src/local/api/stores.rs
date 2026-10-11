@@ -2,7 +2,7 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 use super::rows;
-use super::{created, err, json_to_sql, ok, now_ts, entity_id, ApiResponse, Ctx};
+use super::{created, entity_id, err, json_to_sql, now_ts, ok, ApiResponse, Ctx};
 
 /// GET /api/stores/default (public)
 pub fn get_default_store(ctx: &mut Ctx) -> ApiResponse {
@@ -43,6 +43,13 @@ pub fn get_stores(ctx: &mut Ctx) -> ApiResponse {
 
 /// GET /api/stores/:id
 pub fn get_store(ctx: &mut Ctx, id: &str) -> ApiResponse {
+    let claims = match ctx.claims() {
+        Ok(c) => c.clone(),
+        Err(r) => return r,
+    };
+    if !super::check_store_access(&ctx.conn, &claims, id) {
+        return err(403, "Access denied to this store");
+    }
     match rows::get_store(&ctx.conn, id) {
         Ok(Some(s)) => ok(s),
         Ok(None) => err(404, "Store not found"),
@@ -70,7 +77,11 @@ pub fn create_store(ctx: &mut Ctx, body: Value) -> ApiResponse {
     };
     let invoice_size = {
         let v = g("invoiceSize");
-        if v.is_empty() { "3inch".to_string() } else { v }
+        if v.is_empty() {
+            "3inch".to_string()
+        } else {
+            v
+        }
     };
 
     let res = ctx.conn.execute(
@@ -100,10 +111,9 @@ pub fn create_store(ctx: &mut Ctx, body: Value) -> ApiResponse {
 
     // Auto-assign the new store to a business owner.
     if claims.role == "business_owner" {
-        let assign = ctx.conn.execute(
-            "DELETE FROM user_stores WHERE user_id = ?1",
-            [&claims.id],
-        );
+        let assign = ctx
+            .conn
+            .execute("DELETE FROM user_stores WHERE user_id = ?1", [&claims.id]);
         if let Err(e) = assign {
             return created(json!({
                 "id": id,
@@ -123,9 +133,10 @@ pub fn create_store(ctx: &mut Ctx, body: Value) -> ApiResponse {
         }
     }
 
-    let mut store = rows::get_store(&ctx.conn, &id).ok().flatten().unwrap_or_else(|| {
-        json!({ "id": id, "name": g("name") })
-    });
+    let mut store = rows::get_store(&ctx.conn, &id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({ "id": id, "name": g("name") }));
     store["id"] = json!(id);
     created(store)
 }
@@ -313,7 +324,12 @@ fn check_logo_perm(
                 return Some(err(403, "Not authorized"));
             }
         }
-        "superadmin" | "business_admin" | "staff" => {}
+        "superadmin" => {}
+        "business_admin" | "staff" => {
+            if claims.store_id != id {
+                return Some(err(403, "Not authorized"));
+            }
+        }
         _ => return Some(err(403, "Not authorized")),
     }
     None

@@ -55,7 +55,16 @@ func (h *Handler) GetStores(w http.ResponseWriter, r *http.Request) {
 
 // GetStore handles GET /api/stores/:id
 func (h *Handler) GetStore(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	id := chi.URLParam(r, "id")
+	if !h.canAccessStore(r.Context(), claims, id) {
+		h.writeError(w, http.StatusForbidden, "Access denied to this store")
+		return
+	}
 	s, err := h.Repo.Store.GetByID(r.Context(), id)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
@@ -191,22 +200,22 @@ func (h *Handler) UpdateStore(w http.ResponseWriter, r *http.Request) {
 	// Convert camelCase JSON tags to snake_case column names
 	updates := make(map[string]interface{})
 	keyMapping := map[string]string{
-		"name":              "name",
-		"branch":            "branch",
-		"location":          "location",
-		"gstin":             "gstin",
-		"fssaiNo":           "fssai_no",
-		"phone":             "phone",
-		"printerName":       "printer_name",
-		"printerVendorId":   "printer_vendor_id",
-		"printerProductId":  "printer_product_id",
-		"invoiceSize":       "invoice_size",
-		"kotPrintEnabled":   "kot_print_enabled",
+		"name":                 "name",
+		"branch":               "branch",
+		"location":             "location",
+		"gstin":                "gstin",
+		"fssaiNo":              "fssai_no",
+		"phone":                "phone",
+		"printerName":          "printer_name",
+		"printerVendorId":      "printer_vendor_id",
+		"printerProductId":     "printer_product_id",
+		"invoiceSize":          "invoice_size",
+		"kotPrintEnabled":      "kot_print_enabled",
 		"remoteBillingEnabled": "remote_billing_enabled",
-		"isActive":          "is_active",
-		"themeColor":        "theme_color",
-		"taxEnabled":        "tax_enabled",
-		"defaultTaxPercent": "default_tax_percent",
+		"isActive":             "is_active",
+		"themeColor":           "theme_color",
+		"taxEnabled":           "tax_enabled",
+		"defaultTaxPercent":    "default_tax_percent",
 	}
 
 	for jsonKey, sqlCol := range keyMapping {
@@ -329,7 +338,12 @@ func (h *Handler) UploadLogo(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusForbidden, "Not authorized")
 			return
 		}
-	} else if claims.Role != "superadmin" && claims.Role != "business_admin" && claims.Role != "staff" {
+	} else if claims.Role == "business_admin" || claims.Role == "staff" {
+		if claims.StoreID != id {
+			h.writeError(w, http.StatusForbidden, "Not authorized")
+			return
+		}
+	} else if claims.Role != "superadmin" {
 		h.writeError(w, http.StatusForbidden, "Not authorized")
 		return
 	}
@@ -369,7 +383,12 @@ func (h *Handler) DeleteLogo(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusForbidden, "Not authorized")
 			return
 		}
-	} else if claims.Role != "superadmin" && claims.Role != "business_admin" && claims.Role != "staff" {
+	} else if claims.Role == "business_admin" || claims.Role == "staff" {
+		if claims.StoreID != id {
+			h.writeError(w, http.StatusForbidden, "Not authorized")
+			return
+		}
+	} else if claims.Role != "superadmin" {
 		h.writeError(w, http.StatusForbidden, "Not authorized")
 		return
 	}

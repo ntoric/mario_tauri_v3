@@ -54,6 +54,20 @@ func (s *SyncHandler) Apply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only mutating API writes may be replayed. Rejecting /sync prevents
+	// recursive apply chains and /auth prevents credential-flow replays.
+	switch req.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		writeSyncJSON(w, http.StatusBadRequest, map[string]string{"error": "method must be a mutating verb"})
+		return
+	}
+	if strings.HasPrefix(req.Path, "/sync") || strings.HasPrefix(req.Path, "/auth") ||
+		strings.HasPrefix(req.Path, "/ws") {
+		writeSyncJSON(w, http.StatusBadRequest, map[string]string{"error": "path is not replayable"})
+		return
+	}
+
 	// Idempotency: apply each event exactly once.
 	var actorID interface{}
 	if claims, ok := middleware.GetUserFromContext(r.Context()); ok {
@@ -167,11 +181,26 @@ func (s *SyncHandler) unmarkProcessed(r *http.Request, eventID string) {
 // full snapshot so history isn't replayed). `storeId` scopes the feed — the
 // local system serves exactly one store.
 func (s *SyncHandler) Events(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		writeSyncJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
+		return
+	}
+
 	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 	storeID := r.URL.Query().Get("storeId")
 	limit, _ := strconv.ParseInt(r.URL.Query().Get("limit"), 10, 64)
 	if limit <= 0 || limit > 1000 {
 		limit = 500
+	}
+
+	// The change feed is store-scoped; verify the caller may read it.
+	if storeID == "" {
+		storeID = claims.StoreID
+	}
+	if !s.canAccessStore(r, claims, storeID) {
+		writeSyncJSON(w, http.StatusForbidden, map[string]string{"error": "Access denied to this store"})
+		return
 	}
 
 	var latest int64
@@ -216,6 +245,29 @@ func (s *SyncHandler) Events(w http.ResponseWriter, r *http.Request) {
 		events = append(events, e)
 	}
 	writeSyncJSON(w, http.StatusOK, map[string]interface{}{"latest": latest, "events": events})
+}
+
+// canAccessStore mirrors the handler-layer store RBAC for the sync feed:
+// superadmin → all stores, business_owner → user_stores membership,
+// business_admin/staff → their assigned store only.
+func (s *SyncHandler) canAccessStore(r *http.Request, claims *middleware.UserClaims, storeID string) bool {
+	if storeID == "" {
+		return false
+	}
+	switch claims.Role {
+	case "superadmin":
+		return true
+	case "business_owner":
+		var exists bool
+		if err := s.DB.QueryRowContext(r.Context(),
+			"SELECT EXISTS(SELECT 1 FROM user_stores WHERE user_id = $1 AND store_id = $2)",
+			claims.ID, storeID).Scan(&exists); err != nil {
+			return false
+		}
+		return exists
+	default: // business_admin, staff
+		return claims.StoreID == storeID
+	}
 }
 
 func writeSyncJSON(w http.ResponseWriter, status int, data interface{}) {

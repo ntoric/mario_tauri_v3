@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
-use super::{created, err, missing_ref, ok, target_store, entity_id, ApiResponse, Ctx};
+use super::{
+    check_store_access, created, entity_id, entity_store_id, err, missing_ref, ok, ref_in_store,
+    require_entity_access, target_store, ApiResponse, Ctx,
+};
 
 // ==========================================
 // CATEGORIES
@@ -12,7 +15,7 @@ pub fn get_categories(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -49,13 +52,16 @@ pub fn create_category(ctx: &mut Ctx, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
 
     if missing_ref(&ctx.conn, "stores", &target) {
-        return err(400, "Store is not synced on this device. Sign in again to resync.");
+        return err(
+            400,
+            "Store is not synced on this device. Sign in again to resync.",
+        );
     }
 
     let id = entity_id(&body);
@@ -91,6 +97,9 @@ pub fn create_category(ctx: &mut Ctx, body: Value) -> ApiResponse {
 
 /// PUT /api/categories/:id
 pub fn update_category(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "categories", id) {
+        return r;
+    }
     let res = ctx.conn.execute(
         "UPDATE categories SET name = ?1, description = ?2, enabled = ?3, is_favourite = ?4 WHERE id = ?5",
         rusqlite::params![
@@ -113,6 +122,9 @@ pub fn update_category(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
 
 /// DELETE /api/categories/:id (soft delete)
 pub fn delete_category(ctx: &mut Ctx, id: &str) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "categories", id) {
+        return r;
+    }
     match ctx
         .conn
         .execute("UPDATE categories SET is_active = 0 WHERE id = ?1", [id])
@@ -128,7 +140,11 @@ pub fn delete_category(ctx: &mut Ctx, id: &str) -> ApiResponse {
 
 fn compute_profit(price: f64, total_cost: f64) -> (f64, f64) {
     let profit = price - total_cost;
-    let pct = if price > 0.0 { (profit / price) * 100.0 } else { 0.0 };
+    let pct = if price > 0.0 {
+        (profit / price) * 100.0
+    } else {
+        0.0
+    };
     (profit, pct)
 }
 
@@ -138,7 +154,7 @@ pub fn get_items(ctx: &mut Ctx, store_id: &str, include_profit: bool) -> ApiResp
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -203,7 +219,7 @@ pub fn create_item(ctx: &mut Ctx, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -216,14 +232,27 @@ pub fn create_item(ctx: &mut Ctx, body: Value) -> ApiResponse {
     };
     let category: Option<String> = {
         let c = body["categoryId"].as_str().unwrap_or("").to_string();
-        if c.is_empty() { None } else { Some(c) }
+        if c.is_empty() {
+            None
+        } else {
+            Some(c)
+        }
     };
     if missing_ref(&ctx.conn, "stores", &target) {
-        return err(400, "Store is not synced on this device. Sign in again to resync.");
+        return err(
+            400,
+            "Store is not synced on this device. Sign in again to resync.",
+        );
     }
     if let Some(c) = &category {
         if missing_ref(&ctx.conn, "categories", c) {
-            return err(400, "The selected category no longer exists. Refresh and try again.");
+            return err(
+                400,
+                "The selected category no longer exists. Refresh and try again.",
+            );
+        }
+        if !ref_in_store(&ctx.conn, "categories", c, &target) {
+            return err(400, "The selected category belongs to another store.");
         }
     }
     let res = ctx.conn.execute(
@@ -257,10 +286,23 @@ pub fn create_item(ctx: &mut Ctx, body: Value) -> ApiResponse {
 
 /// PUT /api/items/:id
 pub fn update_item(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "items", id) {
+        return r;
+    }
+    let item_store = entity_store_id(&ctx.conn, "items", id).unwrap_or_default();
     let category: Option<String> = {
         let c = body["categoryId"].as_str().unwrap_or("").to_string();
-        if c.is_empty() { None } else { Some(c) }
+        if c.is_empty() {
+            None
+        } else {
+            Some(c)
+        }
     };
+    if let Some(c) = &category {
+        if !ref_in_store(&ctx.conn, "categories", c, &item_store) {
+            return err(400, "The selected category belongs to another store.");
+        }
+    }
     let res = ctx.conn.execute(
         "UPDATE items SET category_id = ?1, name = ?2, description = ?3, price = ?4, hsn_code = ?5, tax_percent = ?6, enabled = ?7, is_favourite = ?8 WHERE id = ?9",
         rusqlite::params![
@@ -287,6 +329,9 @@ pub fn update_item(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
 
 /// DELETE /api/items/:id (soft delete)
 pub fn delete_item(ctx: &mut Ctx, id: &str) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "items", id) {
+        return r;
+    }
     match ctx
         .conn
         .execute("UPDATE items SET is_active = 0 WHERE id = ?1", [id])
@@ -315,6 +360,13 @@ fn item_expense_json(r: &rusqlite::Row) -> Result<Value, rusqlite::Error> {
 
 /// GET /api/items/:itemId/expenses
 pub fn get_item_expenses(ctx: &mut Ctx, item_id: &str) -> ApiResponse {
+    if let Ok(claims) = ctx.claims() {
+        if let Some(sid) = entity_store_id(&ctx.conn, "items", item_id) {
+            if !check_store_access(&ctx.conn, claims, &sid) {
+                return err(403, "Access denied to this store");
+            }
+        }
+    }
     let mut stmt = match ctx.conn.prepare(
         "SELECT id, store_id, item_id, name, description, amount, is_active, created_at
          FROM item_expenses WHERE item_id = ?1 AND is_active = 1 ORDER BY name",
@@ -340,10 +392,13 @@ pub fn create_item_expense(ctx: &mut Ctx, item_id: &str, body: Value) -> ApiResp
     if name.is_empty() || amount < 0.0 {
         return err(400, "Name and valid amount are required");
     }
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
+    if !ref_in_store(&ctx.conn, "items", item_id, &target) {
+        return err(400, "Item not found in this store");
+    }
 
     let id = entity_id(&body);
     let res = ctx.conn.execute(
@@ -382,15 +437,13 @@ pub fn update_item_expense(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse 
     if name.is_empty() || amount < 0.0 {
         return err(400, "Name and valid amount are required");
     }
+    if let Err(r) = require_entity_access(ctx, "item_expenses", id) {
+        return r;
+    }
 
     let res = ctx.conn.execute(
         "UPDATE item_expenses SET name = ?1, description = ?2, amount = ?3 WHERE id = ?4",
-        rusqlite::params![
-            name,
-            body["description"].as_str().unwrap_or(""),
-            amount,
-            id,
-        ],
+        rusqlite::params![name, body["description"].as_str().unwrap_or(""), amount, id,],
     );
     match res {
         Ok(_) => {
@@ -407,6 +460,9 @@ pub fn update_item_expense(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse 
 
 /// DELETE /api/item-expenses/:id
 pub fn delete_item_expense(ctx: &mut Ctx, id: &str, _store_id: &str) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "item_expenses", id) {
+        return r;
+    }
     match ctx
         .conn
         .execute("UPDATE item_expenses SET is_active = 0 WHERE id = ?1", [id])
@@ -422,7 +478,7 @@ pub fn item_profit_report(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -525,7 +581,11 @@ pub fn item_profit_report(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         }
     }
 
-    let avg_pct = if with_cost > 0 { pct_sum / with_cost as f64 } else { 0.0 };
+    let avg_pct = if with_cost > 0 {
+        pct_sum / with_cost as f64
+    } else {
+        0.0
+    };
 
     ok(json!({
         "storeId": target,

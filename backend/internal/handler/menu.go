@@ -956,6 +956,15 @@ func (h *Handler) BulkCreateMenu(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "storeId is required")
 		return
 	}
+	store, err := h.Repo.Store.GetByID(r.Context(), storeID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if store == nil {
+		h.writeError(w, http.StatusBadRequest, "Store not found")
+		return
+	}
 	if req.Categories == nil {
 		req.Categories = []models.ParsedMenuCategory{}
 	}

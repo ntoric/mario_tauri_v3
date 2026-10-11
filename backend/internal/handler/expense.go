@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"cafe-backend/internal/middleware"
 	"cafe-backend/internal/models"
 
 	"github.com/google/uuid"
@@ -13,9 +14,13 @@ import (
 // Expense Category Handlers
 
 func (h *Handler) GetExpenseCategories(w http.ResponseWriter, r *http.Request) {
-	storeID := r.URL.Query().Get("storeId")
-	if storeID == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID is required")
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	storeID, ok2 := h.resolveTargetStore(w, r, claims, r.URL.Query().Get("storeId"))
+	if !ok2 {
 		return
 	}
 
@@ -29,16 +34,26 @@ func (h *Handler) GetExpenseCategories(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) CreateExpenseCategory(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	var req models.ExpenseCategory
 	if err := h.readJSON(r, &req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	if req.StoreID == "" || req.Name == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID and name are required")
+	storeID, ok2 := h.resolveTargetStore(w, r, claims, req.StoreID)
+	if !ok2 {
 		return
 	}
+	if req.Name == "" {
+		h.writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+	req.StoreID = storeID
 
 	if req.ID == "" {
 		req.ID = uuid.New().String()
@@ -56,9 +71,17 @@ func (h *Handler) CreateExpenseCategory(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) UpdateExpenseCategory(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	id := r.URL.Path[len("/api/expense-categories/"):]
 	if id == "" {
 		h.writeError(w, http.StatusBadRequest, "Category ID is required")
+		return
+	}
+	if !h.checkEntityAccess(w, r, claims, "expense_categories", id) {
 		return
 	}
 
@@ -79,9 +102,17 @@ func (h *Handler) UpdateExpenseCategory(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) DeleteExpenseCategory(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	id := r.URL.Path[len("/api/expense-categories/"):]
 	if id == "" {
 		h.writeError(w, http.StatusBadRequest, "Category ID is required")
+		return
+	}
+	if !h.checkEntityAccess(w, r, claims, "expense_categories", id) {
 		return
 	}
 
@@ -97,9 +128,13 @@ func (h *Handler) DeleteExpenseCategory(w http.ResponseWriter, r *http.Request) 
 // Expense Handlers
 
 func (h *Handler) GetExpenses(w http.ResponseWriter, r *http.Request) {
-	storeID := r.URL.Query().Get("storeId")
-	if storeID == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID is required")
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	storeID, ok2 := h.resolveTargetStore(w, r, claims, r.URL.Query().Get("storeId"))
+	if !ok2 {
 		return
 	}
 
@@ -117,9 +152,17 @@ func (h *Handler) GetExpenses(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetExpense(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	id := r.URL.Path[len("/api/expenses/"):]
 	if id == "" {
 		h.writeError(w, http.StatusBadRequest, "Expense ID is required")
+		return
+	}
+	if !h.checkEntityAccess(w, r, claims, "expenses", id) {
 		return
 	}
 
@@ -139,16 +182,30 @@ func (h *Handler) GetExpense(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) CreateExpense(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	var req models.Expense
 	if err := h.readJSON(r, &req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	if req.StoreID == "" || req.Title == "" || req.Amount == 0 {
-		h.writeError(w, http.StatusBadRequest, "Store ID, title, and amount are required")
+	storeID, ok2 := h.resolveTargetStore(w, r, claims, req.StoreID)
+	if !ok2 {
 		return
 	}
+	if req.Title == "" || req.Amount == 0 {
+		h.writeError(w, http.StatusBadRequest, "Title and amount are required")
+		return
+	}
+	if req.CategoryID != "" && !h.refInStore(r.Context(), "expense_categories", req.CategoryID, storeID) {
+		h.writeError(w, http.StatusBadRequest, "The selected category does not belong to this store")
+		return
+	}
+	req.StoreID = storeID
 
 	if req.ExpenseDate.IsZero() {
 		req.ExpenseDate = time.Now()
@@ -171,9 +228,17 @@ func (h *Handler) CreateExpense(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UpdateExpense(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	id := r.URL.Path[len("/api/expenses/"):]
 	if id == "" {
 		h.writeError(w, http.StatusBadRequest, "Expense ID is required")
+		return
+	}
+	if !h.checkEntityAccess(w, r, claims, "expenses", id) {
 		return
 	}
 
@@ -183,7 +248,14 @@ func (h *Handler) UpdateExpense(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	expenseStore, _ := h.Repo.Store.EntityStoreID(r.Context(), "expenses", id)
+	if req.CategoryID != "" && !h.refInStore(r.Context(), "expense_categories", req.CategoryID, expenseStore) {
+		h.writeError(w, http.StatusBadRequest, "The selected category does not belong to this store")
+		return
+	}
+
 	req.ID = id
+	req.StoreID = expenseStore
 	req.UpdatedAt = time.Now()
 
 	if err := h.Repo.Expense.Update(r.Context(), req); err != nil {
@@ -196,9 +268,17 @@ func (h *Handler) UpdateExpense(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DeleteExpense(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	id := r.URL.Path[len("/api/expenses/"):]
 	if id == "" {
 		h.writeError(w, http.StatusBadRequest, "Expense ID is required")
+		return
+	}
+	if !h.checkEntityAccess(w, r, claims, "expenses", id) {
 		return
 	}
 
@@ -214,9 +294,13 @@ func (h *Handler) DeleteExpense(w http.ResponseWriter, r *http.Request) {
 // Expense Report Handlers
 
 func (h *Handler) GetExpenseReportByCategory(w http.ResponseWriter, r *http.Request) {
-	storeID := r.URL.Query().Get("storeId")
-	if storeID == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID is required")
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	storeID, ok2 := h.resolveTargetStore(w, r, claims, r.URL.Query().Get("storeId"))
+	if !ok2 {
 		return
 	}
 
@@ -238,9 +322,13 @@ func (h *Handler) GetExpenseReportByCategory(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *Handler) GetExpenseSummaryByDate(w http.ResponseWriter, r *http.Request) {
-	storeID := r.URL.Query().Get("storeId")
-	if storeID == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID is required")
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	storeID, ok2 := h.resolveTargetStore(w, r, claims, r.URL.Query().Get("storeId"))
+	if !ok2 {
 		return
 	}
 
@@ -264,9 +352,13 @@ func (h *Handler) GetExpenseSummaryByDate(w http.ResponseWriter, r *http.Request
 // Revenue Report Handlers
 
 func (h *Handler) GetRevenueReport(w http.ResponseWriter, r *http.Request) {
-	storeID := r.URL.Query().Get("storeId")
-	if storeID == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID is required")
+	claims, ok := middleware.GetUserFromContext(r.Context())
+	if !ok {
+		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	storeID, ok2 := h.resolveTargetStore(w, r, claims, r.URL.Query().Get("storeId"))
+	if !ok2 {
 		return
 	}
 

@@ -2,7 +2,9 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 use super::rows::{self, ItemsKind};
-use super::{created, err, now_ts, ok, entity_id, ApiResponse, Ctx};
+use super::{
+    authorize_store, created, entity_id, err, now_ts, ok, require_entity_access, ApiResponse, Ctx,
+};
 
 // ==========================================
 // EXPENSE CATEGORIES
@@ -10,9 +12,10 @@ use super::{created, err, now_ts, ok, entity_id, ApiResponse, Ctx};
 
 /// GET /api/expense-categories?storeId=
 pub fn get_expense_categories(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
-    if store_id.is_empty() {
-        return err(400, "Store ID is required");
-    }
+    let target = match authorize_store(ctx, store_id) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     let mut stmt = match ctx.conn.prepare(
         "SELECT id, store_id, name, COALESCE(description, ''), is_active
          FROM expense_categories WHERE store_id = ?1 AND is_active = 1 ORDER BY name",
@@ -20,7 +23,7 @@ pub fn get_expense_categories(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(s) => s,
         Err(_) => return err(500, "Failed to fetch expense categories"),
     };
-    let cats: Vec<Value> = match stmt.query_map([store_id], |r| {
+    let cats: Vec<Value> = match stmt.query_map([&target], |r| {
         Ok(json!({
             "id": r.get::<_, String>(0)?,
             "storeId": r.get::<_, String>(1)?,
@@ -37,15 +40,18 @@ pub fn get_expense_categories(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
 
 /// POST /api/expense-categories
 pub fn create_expense_category(ctx: &mut Ctx, body: Value) -> ApiResponse {
-    let store_id = body["storeId"].as_str().unwrap_or("");
     let name = body["name"].as_str().unwrap_or("");
-    if store_id.is_empty() || name.is_empty() {
+    if name.is_empty() {
         return err(400, "Store ID and name are required");
     }
+    let target = match authorize_store(ctx, body["storeId"].as_str().unwrap_or("")) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     let id = entity_id(&body);
     let res = ctx.conn.execute(
         "INSERT INTO expense_categories (id, store_id, name, description) VALUES (?1,?2,?3,?4)",
-        rusqlite::params![id, store_id, name, body["description"].as_str().unwrap_or("")],
+        rusqlite::params![id, target, name, body["description"].as_str().unwrap_or("")],
     );
     match res {
         Ok(_) => {
@@ -61,6 +67,9 @@ pub fn create_expense_category(ctx: &mut Ctx, body: Value) -> ApiResponse {
 
 /// PUT /api/expense-categories/:id
 pub fn update_expense_category(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "expense_categories", id) {
+        return r;
+    }
     let res = ctx.conn.execute(
         "UPDATE expense_categories SET name = ?1, description = ?2 WHERE id = ?3",
         rusqlite::params![
@@ -81,10 +90,13 @@ pub fn update_expense_category(ctx: &mut Ctx, id: &str, body: Value) -> ApiRespo
 
 /// DELETE /api/expense-categories/:id
 pub fn delete_expense_category(ctx: &mut Ctx, id: &str) -> ApiResponse {
-    match ctx
-        .conn
-        .execute("UPDATE expense_categories SET is_active = 0 WHERE id = ?1", [id])
-    {
+    if let Err(r) = require_entity_access(ctx, "expense_categories", id) {
+        return r;
+    }
+    match ctx.conn.execute(
+        "UPDATE expense_categories SET is_active = 0 WHERE id = ?1",
+        [id],
+    ) {
         Ok(_) => ok(json!({ "message": "Expense category deleted successfully" })),
         Err(_) => err(500, "Failed to delete expense category"),
     }
@@ -124,9 +136,11 @@ const EXPENSE_COLS: &str =
 
 /// GET /api/expenses?storeId=&startDate=&endDate=
 pub fn get_expenses(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) -> ApiResponse {
-    if store_id.is_empty() {
-        return err(400, "Store ID is required");
-    }
+    let target = match authorize_store(ctx, store_id) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let store_id = target.as_str();
     let mut sql = format!(
         "SELECT {} FROM expenses e LEFT JOIN expense_categories ec ON e.category_id = ec.id
          WHERE e.store_id = ?1 AND e.is_active = 1",
@@ -159,6 +173,9 @@ pub fn get_expenses(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) -> Ap
 
 /// GET /api/expenses/:id
 pub fn get_expense(ctx: &mut Ctx, id: &str) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "expenses", id) {
+        return r;
+    }
     let sql = format!(
         "SELECT {} FROM expenses e LEFT JOIN expense_categories ec ON e.category_id = ec.id
          WHERE e.id = ?1",
@@ -181,16 +198,23 @@ pub fn create_expense(ctx: &mut Ctx, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let store_id = body["storeId"].as_str().unwrap_or("");
+    let store_id = match authorize_store(ctx, body["storeId"].as_str().unwrap_or("")) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     let title = body["title"].as_str().unwrap_or("");
     let amount = body["amount"].as_f64().unwrap_or(0.0);
-    if store_id.is_empty() || title.is_empty() || amount == 0.0 {
+    if title.is_empty() || amount == 0.0 {
         return err(400, "Store ID, title, and amount are required");
     }
 
     let expense_date = {
         let d = body["expenseDate"].as_str().unwrap_or("");
-        if d.is_empty() { now_ts() } else { d.to_string() }
+        if d.is_empty() {
+            now_ts()
+        } else {
+            d.to_string()
+        }
     };
     let id = entity_id(&body);
     let attachments = if body["attachments"].is_array() {
@@ -220,6 +244,13 @@ pub fn create_expense(ctx: &mut Ctx, body: Value) -> ApiResponse {
         .map(String::from)
         .unwrap_or_else(|| claims.id.clone());
 
+    // An expense's category must live in the same store.
+    if let Some(cid) = category.as_deref() {
+        if !super::ref_in_store(&ctx.conn, "expense_categories", cid, &store_id) {
+            return err(400, "The selected category belongs to another store.");
+        }
+    }
+
     let res = ctx.conn.execute(
         "INSERT INTO expenses (id, store_id, category_id, title, description, amount, expense_date, payment_method, receipt_number, vendor, attachments, created_by)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
@@ -247,6 +278,10 @@ pub fn create_expense(ctx: &mut Ctx, body: Value) -> ApiResponse {
 
 /// PUT /api/expenses/:id
 pub fn update_expense(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "expenses", id) {
+        return r;
+    }
+    let expense_store = super::entity_store_id(&ctx.conn, "expenses", id).unwrap_or_default();
     let attachments = if body["attachments"].is_array() {
         body["attachments"].to_string()
     } else {
@@ -269,6 +304,12 @@ pub fn update_expense(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
         .filter(|s| !s.is_empty())
         .map(String::from);
 
+    if let Some(cid) = category.as_deref() {
+        if !super::ref_in_store(&ctx.conn, "expense_categories", cid, &expense_store) {
+            return err(400, "The selected category belongs to another store.");
+        }
+    }
+
     let res = ctx.conn.execute(
         "UPDATE expenses SET category_id = ?1, title = ?2, description = ?3, amount = ?4,
          expense_date = ?5, payment_method = ?6, receipt_number = ?7, vendor = ?8,
@@ -279,7 +320,12 @@ pub fn update_expense(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
             body["description"].as_str().unwrap_or(""),
             body["amount"].as_f64().unwrap_or(0.0),
             body["expenseDate"].as_str().unwrap_or(""),
-            pay, receipt, vendor, attachments, now_ts(), id,
+            pay,
+            receipt,
+            vendor,
+            attachments,
+            now_ts(),
+            id,
         ],
     );
     match res {
@@ -295,6 +341,9 @@ pub fn update_expense(ctx: &mut Ctx, id: &str, body: Value) -> ApiResponse {
 
 /// DELETE /api/expenses/:id
 pub fn delete_expense(ctx: &mut Ctx, id: &str) -> ApiResponse {
+    if let Err(r) = require_entity_access(ctx, "expenses", id) {
+        return r;
+    }
     match ctx
         .conn
         .execute("UPDATE expenses SET is_active = 0 WHERE id = ?1", [id])
@@ -310,9 +359,11 @@ pub fn delete_expense(ctx: &mut Ctx, id: &str) -> ApiResponse {
 
 /// GET /api/expenses/report/by-category
 pub fn report_by_category(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) -> ApiResponse {
-    if store_id.is_empty() {
-        return err(400, "Store ID is required");
-    }
+    let target = match authorize_store(ctx, store_id) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let store_id = target.as_str();
     let mut sql = String::from(
         "SELECT ec.id, ec.name,
                 COALESCE(SUM(e.amount), 0), COUNT(e.id)
@@ -344,7 +395,10 @@ pub fn report_by_category(ctx: &mut Ctx, store_id: &str, start: &str, end: &str)
                     AND (e.expense_date IS NULL OR e.expense_date <= ?2)",
             );
         } else {
-            sql += &format!(" AND (e.expense_date IS NULL OR e.expense_date <= ?{})", idx);
+            sql += &format!(
+                " AND (e.expense_date IS NULL OR e.expense_date <= ?{})",
+                idx
+            );
         }
         args.push(end.to_string());
     }
@@ -354,15 +408,14 @@ pub fn report_by_category(ctx: &mut Ctx, store_id: &str, start: &str, end: &str)
         Ok(s) => s,
         Err(_) => return err(500, "Failed to fetch expense report"),
     };
-    let reports: Vec<Value> = match stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
-            Ok(json!({
-                "categoryId": r.get::<_, String>(0)?,
-                "categoryName": r.get::<_, String>(1)?,
-                "totalAmount": r.get::<_, f64>(2)?,
-                "expenseCount": r.get::<_, i64>(3)?,
-            }))
-        }) {
+    let reports: Vec<Value> = match stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+        Ok(json!({
+            "categoryId": r.get::<_, String>(0)?,
+            "categoryName": r.get::<_, String>(1)?,
+            "totalAmount": r.get::<_, f64>(2)?,
+            "expenseCount": r.get::<_, i64>(3)?,
+        }))
+    }) {
         Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
         Err(e) => return err(500, e.to_string()),
     };
@@ -371,9 +424,11 @@ pub fn report_by_category(ctx: &mut Ctx, store_id: &str, start: &str, end: &str)
 
 /// GET /api/expenses/report/by-date
 pub fn summary_by_date(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) -> ApiResponse {
-    if store_id.is_empty() {
-        return err(400, "Store ID is required");
-    }
+    let target = match authorize_store(ctx, store_id) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let store_id = target.as_str();
     let mut sql = String::from(
         "SELECT substr(e.expense_date, 1, 10) as date,
                 COALESCE(SUM(e.amount), 0), COUNT(e.id)
@@ -397,14 +452,13 @@ pub fn summary_by_date(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) ->
         Ok(s) => s,
         Err(_) => return err(500, "Failed to fetch expense summary"),
     };
-    let summaries: Vec<Value> = match stmt
-        .query_map(rusqlite::params_from_iter(args.iter()), |r| {
-            Ok(json!({
-                "date": r.get::<_, String>(0)?,
-                "totalAmount": r.get::<_, f64>(1)?,
-                "expenseCount": r.get::<_, i64>(2)?,
-            }))
-        }) {
+    let summaries: Vec<Value> = match stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+        Ok(json!({
+            "date": r.get::<_, String>(0)?,
+            "totalAmount": r.get::<_, f64>(1)?,
+            "expenseCount": r.get::<_, i64>(2)?,
+        }))
+    }) {
         Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
         Err(e) => return err(500, e.to_string()),
     };
@@ -413,9 +467,11 @@ pub fn summary_by_date(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) ->
 
 /// GET /api/reports/revenue
 pub fn revenue_report(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) -> ApiResponse {
-    if store_id.is_empty() {
-        return err(400, "Store ID is required");
-    }
+    let target = match authorize_store(ctx, store_id) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let store_id = target.as_str();
     let conn = &ctx.conn;
 
     // Date filters for bills (generated_at) and orders (created_at) use
@@ -445,14 +501,13 @@ pub fn revenue_report(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) -> 
     );
     let mut all_args: Vec<String> = vec![store_id.to_string()];
     all_args.append(&mut bargs);
-    let (total_revenue, total_bills): (f64, i64) = match conn.query_row(
-        &rev_sql,
-        rusqlite::params_from_iter(all_args.iter()),
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ) {
-        Ok(v) => v,
-        Err(e) => return err(500, e.to_string()),
-    };
+    let (total_revenue, total_bills): (f64, i64) =
+        match conn.query_row(&rev_sql, rusqlite::params_from_iter(all_args.iter()), |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        }) {
+            Ok(v) => v,
+            Err(e) => return err(500, e.to_string()),
+        };
 
     // Total expenses
     let (ef, mut eargs) = bill_filter("e.expense_date");
@@ -463,14 +518,13 @@ pub fn revenue_report(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) -> 
     );
     let mut exp_args: Vec<String> = vec![store_id.to_string()];
     exp_args.append(&mut eargs);
-    let (total_expenses, total_expense_count): (f64, i64) = match conn.query_row(
-        &exp_sql,
-        rusqlite::params_from_iter(exp_args.iter()),
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ) {
-        Ok(v) => v,
-        Err(e) => return err(500, e.to_string()),
-    };
+    let (total_expenses, total_expense_count): (f64, i64) =
+        match conn.query_row(&exp_sql, rusqlite::params_from_iter(exp_args.iter()), |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        }) {
+            Ok(v) => v,
+            Err(e) => return err(500, e.to_string()),
+        };
 
     // Completed orders count
     let (of, mut oargs) = bill_filter("o.created_at");
@@ -529,9 +583,10 @@ pub fn revenue_report(ctx: &mut Ctx, store_id: &str, start: &str, end: &str) -> 
         Ok(s) => s,
         Err(e) => return err(500, e.to_string()),
     };
-    let expenses: Vec<Value> = match stmt
-        .query_map(rusqlite::params_from_iter(exp_list_args.iter()), expense_json)
-    {
+    let expenses: Vec<Value> = match stmt.query_map(
+        rusqlite::params_from_iter(exp_list_args.iter()),
+        expense_json,
+    ) {
         Ok(rs) => rs.filter_map(|r| r.ok()).collect(),
         Err(e) => return err(500, e.to_string()),
     };

@@ -100,6 +100,9 @@ export const useAuthStore = create<AuthState>()(
       clearAuth: () => {
         clearAuthStorage();
         api.clearToken();
+        // Drop all store-scoped data so a different user's session can never
+        // see (or briefly render) the previous session's entities.
+        useDataStore.getState().reset();
         set({
           user: null,
           token: null,

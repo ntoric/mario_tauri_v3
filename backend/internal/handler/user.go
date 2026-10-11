@@ -81,6 +81,21 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		finalStoreID = claims.StoreID
 	}
 
+	// A business owner may only attach users to stores they own.
+	if claims.Role == "business_owner" {
+		owned := h.callerStoreIDs(r.Context(), claims.ID)
+		if finalStoreID != "" && !owned[finalStoreID] {
+			h.writeError(w, http.StatusForbidden, "Can only assign users to your own stores")
+			return
+		}
+		for _, sid := range raw.StoreIDs {
+			if !owned[sid] {
+				h.writeError(w, http.StatusForbidden, "Can only assign users to your own stores")
+				return
+			}
+		}
+	}
+
 	hashedPassword, err := security.HashPassword(raw.Password)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, "Failed to hash password")
@@ -127,6 +142,10 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
+	if claims.Role != "superadmin" && claims.Role != "business_owner" && claims.Role != "business_admin" {
+		h.writeError(w, http.StatusForbidden, "Not authorized")
+		return
+	}
 
 	targetUser, err := h.Repo.User.GetByID(r.Context(), id)
 	if err != nil {
@@ -142,10 +161,21 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, "Not authorized")
 		return
 	}
+	if !h.canManageUser(r.Context(), claims, targetUser) {
+		h.writeError(w, http.StatusForbidden, "Not authorized")
+		return
+	}
 
 	var raw map[string]interface{}
 	if err := h.readJSON(r, &raw); err != nil {
 		h.writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	// Store reassignment must stay inside the caller's own scope.
+	newStoreID, _ := raw["storeId"].(string)
+	if claims.Role == "business_admin" && newStoreID != "" && newStoreID != claims.StoreID {
+		h.writeError(w, http.StatusForbidden, "Can only assign users to your own store")
 		return
 	}
 
@@ -181,6 +211,20 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if claims.Role == "business_owner" {
+		owned := h.callerStoreIDs(r.Context(), claims.ID)
+		if newStoreID != "" && !owned[newStoreID] {
+			h.writeError(w, http.StatusForbidden, "Can only assign users to your own stores")
+			return
+		}
+		for _, sid := range storeIDs {
+			if !owned[sid] {
+				h.writeError(w, http.StatusForbidden, "Can only assign users to your own stores")
+				return
+			}
+		}
+	}
+
 	err = h.Repo.User.Update(r.Context(), id, updates, storeIDs, hasStoreIDs)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
@@ -196,6 +240,10 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.GetUserFromContext(r.Context())
 	if !ok {
 		h.writeError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	if claims.Role != "superadmin" && claims.Role != "business_owner" && claims.Role != "business_admin" {
+		h.writeError(w, http.StatusForbidden, "Not authorized")
 		return
 	}
 
@@ -219,24 +267,9 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if claims.Role == "business_owner" {
-		// Can only delete users in their stores
-		stores, errStore := h.Repo.User.GetUserStores(r.Context(), claims.ID)
-		if errStore != nil {
-			h.writeError(w, http.StatusInternalServerError, errStore.Error())
-			return
-		}
-		hasAccess := false
-		for _, s := range stores {
-			if s.ID == targetUser.StoreID {
-				hasAccess = true
-				break
-			}
-		}
-		if !hasAccess && targetUser.ID != claims.ID {
-			h.writeError(w, http.StatusForbidden, "Not authorized")
-			return
-		}
+	if !h.canManageUser(r.Context(), claims, targetUser) {
+		h.writeError(w, http.StatusForbidden, "Not authorized")
+		return
 	}
 
 	err = h.Repo.User.Delete(r.Context(), id)

@@ -309,7 +309,7 @@ func (r *UserRepository) GetAll(ctx context.Context, role, userID, storeID strin
 		sqlStr += fmt.Sprintf(" AND (u.store_id IN (SELECT store_id FROM user_stores WHERE user_id = $%d) OR u.id = $%d)", idx, idx)
 		args = append(args, userID)
 		idx++
-	} else if role == "business_admin" {
+	} else if role == "business_admin" || role == "staff" {
 		sqlStr += fmt.Sprintf(" AND u.store_id = $%d", idx)
 		args = append(args, storeID)
 		idx++
@@ -398,6 +398,32 @@ func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*m
 	u.StoreID = storeIDNull.String
 	u.StoreName = storeNameNull.String
 	return &u, nil
+}
+
+// EntityStoreID returns the store_id of a row in a store-scoped table.
+// `table` must be a fixed literal — never user input.
+func (r *StoreRepository) EntityStoreID(ctx context.Context, table, id string) (string, error) {
+	var sid sql.NullString
+	err := r.db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT store_id FROM %s WHERE id = $1", table), id).Scan(&sid)
+	if err != nil {
+		return "", err
+	}
+	return sid.String, nil
+}
+
+// SharesStore reports whether two users share any store via user_stores —
+// used to scope user management for business owners whose memberships live
+// in user_stores rather than users.store_id.
+func (r *UserRepository) SharesStore(ctx context.Context, a, b string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM user_stores t
+			JOIN user_stores o ON t.store_id = o.store_id
+			WHERE t.user_id = $1 AND o.user_id = $2)`,
+		a, b).Scan(&exists)
+	return exists, err
 }
 
 func (r *UserRepository) GetUserStores(ctx context.Context, userID string) ([]models.Store, error) {

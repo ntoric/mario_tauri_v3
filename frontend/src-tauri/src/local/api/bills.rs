@@ -1,7 +1,10 @@
 use serde_json::{json, Value};
 
 use super::rows::{self, ItemsKind};
-use super::{coerce_text, created, err, missing_ref, now_ts, ok, target_store, entity_id, ApiResponse, Ctx};
+use super::{
+    coerce_text, created, entity_id, err, missing_ref, now_ts, ok, ref_in_store, target_store,
+    ApiResponse, Ctx,
+};
 
 fn attach_bill_items(conn: &rusqlite::Connection, bills: &mut Vec<Value>) {
     let order_ids: Vec<String> = bills
@@ -21,7 +24,7 @@ pub fn get_bills(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -34,12 +37,11 @@ pub fn get_bills(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(s) => s,
         Err(e) => return err(500, e.to_string()),
     };
-    let mut bills: Vec<Value> = match stmt.query_map([&target], |r| {
-        Ok(rows::bill_json(r, vec![], true))
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e) => return err(500, e.to_string()),
-    };
+    let mut bills: Vec<Value> =
+        match stmt.query_map([&target], |r| Ok(rows::bill_json(r, vec![], true))) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => return err(500, e.to_string()),
+        };
     drop(stmt);
 
     attach_bill_items(&ctx.conn, &mut bills);
@@ -52,7 +54,7 @@ pub fn create_bill(ctx: &mut Ctx, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -60,11 +62,20 @@ pub fn create_bill(ctx: &mut Ctx, body: Value) -> ApiResponse {
     // Clear errors instead of a raw FK failure when the client references a
     // store/order that isn't synced locally.
     if missing_ref(&ctx.conn, "stores", &target) {
-        return err(400, "Store is not synced on this device. Sign in again to resync.");
+        return err(
+            400,
+            "Store is not synced on this device. Sign in again to resync.",
+        );
     }
     if let Some(oid) = body["orderId"].as_str().filter(|s| !s.is_empty()) {
         if missing_ref(&ctx.conn, "orders", oid) {
-            return err(404, "Order not found — it may have been removed. Refresh and try again.");
+            return err(
+                404,
+                "Order not found — it may have been removed. Refresh and try again.",
+            );
+        }
+        if !ref_in_store(&ctx.conn, "orders", oid, &target) {
+            return err(400, "Order does not belong to this store");
         }
     }
 
@@ -120,7 +131,7 @@ pub fn get_next_invoice_no(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -142,7 +153,7 @@ pub fn queue_bill(ctx: &mut Ctx, body: Value) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, body["storeId"].as_str().unwrap_or("")) {
+    let target = match target_store(&ctx.conn, &claims, body["storeId"].as_str().unwrap_or("")) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -160,6 +171,11 @@ pub fn queue_bill(ctx: &mut Ctx, body: Value) -> ApiResponse {
         None => return err(404, "Store not found"),
         Some(false) => return err(400, "Remote billing is not enabled for this store"),
         Some(true) => {}
+    }
+    if let Some(oid) = body["orderId"].as_str().filter(|s| !s.is_empty()) {
+        if !ref_in_store(&ctx.conn, "orders", oid, &target) {
+            return err(400, "Order does not belong to this store");
+        }
     }
 
     let queue_id = entity_id(&body);
@@ -204,7 +220,7 @@ pub fn get_bill_queue(ctx: &mut Ctx, store_id: &str) -> ApiResponse {
         Ok(c) => c.clone(),
         Err(r) => return r,
     };
-    let target = match target_store(&claims, store_id) {
+    let target = match target_store(&ctx.conn, &claims, store_id) {
         Ok(t) => t,
         Err(r) => return r,
     };

@@ -41,13 +41,8 @@ func (h *Handler) TableStatusWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	storeID := r.URL.Query().Get("storeId")
-	targetStoreID := storeID
-	if targetStoreID == "" {
-		targetStoreID = claims.StoreID
-	}
-	if targetStoreID == "" {
-		h.writeError(w, http.StatusBadRequest, "Store ID required")
+	targetStoreID, ok2 := h.resolveTargetStore(w, r, claims, r.URL.Query().Get("storeId"))
+	if !ok2 {
 		return
 	}
 
