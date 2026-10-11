@@ -131,13 +131,21 @@ fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
 }
 
 /// Windows has no portable inode number — the volume serial + file index
-/// serve the same purpose.
+/// serve the same purpose. The `MetadataExt` accessors for these are
+/// nightly-only, so we call `GetFileInformationByHandle` directly.
 #[cfg(windows)]
 fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
-    use std::os::windows::fs::MetadataExt;
-    std::fs::metadata(path)
-        .ok()
-        .map(|m| (m.volume_serial_number(), m.file_index()))
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let file = std::fs::File::open(path).ok()?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+        return None;
+    }
+    let index = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    Some((info.dwVolumeSerialNumber as u64, index))
 }
 
 #[cfg(not(any(unix, windows)))]

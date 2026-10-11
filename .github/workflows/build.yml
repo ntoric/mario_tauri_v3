@@ -130,6 +130,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          MARIO_CLOUD_URL: ${{ secrets.MARIO_CLOUD_URL }}
 
       - name: Debug bundle output
         shell: bash

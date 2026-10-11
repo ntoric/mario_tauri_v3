@@ -47,6 +47,16 @@ fn env_cloud_url() -> Option<String> {
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty())
 }
+
+/// `MARIO_CLOUD_URL` baked into the binary at build time by CI
+/// (`MARIO_CLOUD_URL=https://... cargo build --release`). Serves as the
+/// production default — still overridable per-device via the
+/// `cloud_base_url` global setting (e.g. "local" for LAN-only installs).
+fn baked_cloud_url() -> Option<String> {
+    option_env!("MARIO_CLOUD_URL")
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+}
 const REQ_TIMEOUT: Duration = Duration::from_secs(8);
 const CYCLE_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_PUSH_ATTEMPTS: i64 = 10;
@@ -79,6 +89,7 @@ fn cloud_base(conn: &Connection) -> String {
     }
     get_setting(conn, "cloud_base_url")
         .filter(|s| !s.is_empty())
+        .or_else(baked_cloud_url)
         .unwrap_or_else(|| default_cloud_base().to_string())
         .trim_end_matches('/')
         .to_string()
@@ -144,6 +155,7 @@ pub fn stored_session(state: &LocalBackend) -> Value {
 pub fn local_only_mode(conn: &Connection) -> bool {
     let value = env_cloud_url()
         .or_else(|| get_setting(conn, "cloud_base_url"))
+        .or_else(baked_cloud_url)
         .unwrap_or_default();
     matches!(value.as_str(), "local" | "local-only" | "off" | "none")
 }

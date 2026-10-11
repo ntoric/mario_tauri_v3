@@ -2306,6 +2306,7 @@ dependencies = [
  "tokio-tungstenite",
  "tower-http",
  "uuid",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
